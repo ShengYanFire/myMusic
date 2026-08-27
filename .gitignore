@@ -6,6 +6,9 @@ android/build/
 *.iml
 .idea/
 
+# Machine-specific toolchain setup script (references local DevEco JDK path)
+setup-toolchain.cmd
+
 # OS
 Thumbs.db
 .DS_Store
