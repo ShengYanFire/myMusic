@@ -1,0 +1,10 @@
+# Normalize line endings; keep shell scripts LF so they run on Linux CI.
+* text=auto
+
+# gradlew (POSIX shell) must stay LF even on Windows checkouts
+gradlew text eol=lf
+
+# Keep generated/binary artifacts out
+*.jar binary
+*.apk binary
+*.png binary
