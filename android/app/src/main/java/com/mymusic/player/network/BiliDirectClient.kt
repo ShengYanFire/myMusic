@@ -1,7 +1,9 @@
 package com.mymusic.player.network
 
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 import com.mymusic.player.data.AppSettings
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -55,9 +57,9 @@ class BiliDirectClient(private val settings: AppSettings) {
                 bvid = o.str("bvid"),
                 title = stripHtml(o.str("title")),
                 pic = normalizePic(o.str("pic")),
-                duration = o.get("duration")?.asInt ?: 0,
+                duration = o.get("duration").intOr(),
                 author = o.str("author"),
-                play = o.get("play")?.asLong,
+                play = o.get("play").longOrNull(),
             )
         }
     }
@@ -66,7 +68,7 @@ class BiliDirectClient(private val settings: AppSettings) {
     suspend fun videoInfo(bvid: String): VideoInfo {
         val d = get("/x/web-interface/view", mapOf("bvid" to bvid), signed = false)
             .obj("data")
-        return VideoInfo(bvid = d.str("bvid"), cid = d.get("cid")?.asLong)
+        return VideoInfo(bvid = d.str("bvid"), cid = d.get("cid").longOrNull())
     }
 
     /** Best audio-only DASH stream; quality "low" = least data. */
@@ -82,12 +84,12 @@ class BiliDirectClient(private val settings: AppSettings) {
         if (list.isEmpty()) {
             throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
         }
-        val sorted = list.sortedBy { it.get("bandwidth")?.asLong ?: 0L }
+        val sorted = list.sortedBy { it.get("bandwidth").longOr() }
         val pick = if (quality == "low") sorted.first() else sorted.last()
         return AudioInfo(
             url = pick.str("baseUrl"),
-            duration = pick.get("duration")?.asLong
-                ?: dash.get("duration")?.asLong ?: 0L,
+            duration = pick.get("duration").longOrNull()
+                ?: dash.get("duration").longOrNull(),
         )
     }
 
@@ -140,7 +142,7 @@ class BiliDirectClient(private val settings: AppSettings) {
                 if (!resp.isSuccessful) throw RuntimeException("B 站返回 HTTP ${resp.code}")
                 val text = resp.body?.string() ?: throw RuntimeException("B 站返回空响应")
                 val obj = JsonParser.parseString(text).asJsonObject
-                val code = obj.get("code")?.asInt ?: -1
+                val code = obj.get("code").intOr(-1)
                 // /nav returns -101 "账号未登录" for guests, but still carries the
                 // wbi_img keys in data — so tolerate it where login isn't required.
                 if (code != 0 && !(allowLoggedOut && code == -101)) {
@@ -211,6 +213,26 @@ class BiliDirectClient(private val settings: AppSettings) {
         getAsJsonObject(name) ?: throw RuntimeException("B 站响应缺少 $name")
 
     private fun JsonObject.str(name: String): String = get(name)?.asString ?: ""
+
+    /**
+     * Robust number reading. Bilibili sometimes returns numbers as decimal strings
+     * (e.g. "50.14" for a DASH duration), which strict asInt/asLong would crash on.
+     * Numbers are truncated to whole; strings have any decimal part stripped.
+     */
+    private fun JsonElement?.longOrNull(): Long? {
+        if (this == null) return null
+        if (this is JsonPrimitive) {
+            if (this.isNumber) return this.asLong
+            val s = this.asString.trim()
+            if (s.isEmpty()) return null
+            return s.substringBefore('.').toLongOrNull()
+        }
+        return null
+    }
+
+    private fun JsonElement?.longOr(default: Long = 0L): Long = longOrNull() ?: default
+
+    private fun JsonElement?.intOr(default: Int = 0): Int = longOrNull()?.toInt() ?: default
 
     private fun stripHtml(text: String): String =
         text.replace(Regex("<[^>]+>"), "").trim()
