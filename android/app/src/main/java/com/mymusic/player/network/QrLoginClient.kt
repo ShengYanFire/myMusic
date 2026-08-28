@@ -108,13 +108,17 @@ class QrLoginClient {
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("登录轮询返回 HTTP ${resp.code}")
+            val setCookies = resp.headers("Set-Cookie")
             val obj = JsonParser.parseString(resp.body?.string() ?: "").asJsonObject
             when (val code = obj.get("code")?.asInt ?: -1) {
                 0 -> {
-                    val cookie = obj.getAsJsonObject("data")
+                    val urlCookies = obj.getAsJsonObject("data")
                         ?.get("url")?.asString
                         ?.let { extractCookies(it) }
                         .orEmpty()
+                    // Recent Bilibili flows may deliver the login cookies via
+                    // Set-Cookie response headers instead of the redirect URL.
+                    val cookie = urlCookies.ifBlank { extractCookiesFromHeaders(setCookies) }
                     if (cookie.isBlank()) throw RuntimeException("登录成功但未解析到 Cookie")
                     Result.Success(cookie)
                 }
@@ -134,10 +138,28 @@ class QrLoginClient {
             .split('&')
             .mapNotNull { pair ->
                 val key = pair.substringBefore('=').trim()
-                val value = pair.substringAfter('=', "").trim()
-                if (key in wanted && value.isNotEmpty()) "$key=$value" else null
+                val raw = pair.substringAfter('=', "").trim()
+                if (key in wanted && raw.isNotEmpty()) {
+                    val value = runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }
+                        .getOrElse { raw }
+                    "$key=$value"
+                } else null
             }
         return found.joinToString("; ")
+    }
+
+    /** Pull the same three cookies out of Set-Cookie response headers. */
+    private fun extractCookiesFromHeaders(setCookieHeaders: List<String>): String {
+        val wanted = listOf("SESSDATA", "bili_jct", "DedeUserID")
+        val found = mutableMapOf<String, String>()
+        for (header in setCookieHeaders) {
+            val first = header.substringBefore(';').trim()
+            val key = first.substringBefore('=').trim()
+            val value = first.substringAfter('=', "").trim()
+            if (key in wanted && value.isNotEmpty()) found[key] = value
+        }
+        return wanted.mapNotNull { key -> found[key]?.let { "$key=$it" } }
+            .joinToString("; ")
     }
 
     companion object {
