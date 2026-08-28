@@ -7,6 +7,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import com.google.common.util.concurrent.MoreExecutors
 import com.mymusic.player.domain.Track
@@ -56,8 +57,11 @@ object PlayerController {
                     "message=${error.message} cause=${error.cause}",
             )
             val causeMsg = error.cause?.message ?: error.message ?: "未知错误"
+            val failedUrl = (error.cause as? HttpDataSource.InvalidResponseCodeException)
+                ?.dataSpec?.uri?.toString()
             _state.value = _state.value.copy(
-                error = "播放失败（错误码 ${error.errorCode}）：$causeMsg",
+                error = "播放失败（错误码 ${error.errorCode}）：$causeMsg" +
+                    (failedUrl?.let { "\n$it" } ?: ""),
                 isPlaying = false,
             )
         }

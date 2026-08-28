@@ -37,7 +37,12 @@ class PlaybackService : MediaSessionService() {
 
         val defaultHeaders = buildMap {
             put("Referer", "https://www.bilibili.com/")
-            put("User-Agent", "Mozilla/5.0 (Linux; Android 13) MyMusic/1.0")
+            put(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) " +
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 " +
+                    "Chrome/120.0.0.0 Mobile Safari/537.36",
+            )
             if (cookie.isNotBlank()) put("Cookie", cookie)
         }
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
