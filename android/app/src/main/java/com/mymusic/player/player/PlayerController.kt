@@ -1,7 +1,9 @@
 package com.mymusic.player.player
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Process
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -10,6 +12,7 @@ import androidx.media3.common.Player
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import com.google.common.util.concurrent.MoreExecutors
+import com.mymusic.player.MyMusicApp
 import com.mymusic.player.domain.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 data class PlayerUiState(
@@ -44,6 +48,14 @@ object PlayerController {
 
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
+
+    private val _repeatMode = MutableStateFlow(Player.REPEAT_MODE_OFF)
+    val repeatMode: StateFlow<Int> = _repeatMode.asStateFlow()
+
+    private val _sleepRemainingMs = MutableStateFlow<Long?>(null)
+    val sleepRemainingMs: StateFlow<Long?> = _sleepRemainingMs.asStateFlow()
+
+    private var sleepDeadlineMs: Long? = null
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -101,6 +113,12 @@ object PlayerController {
             controller = c
             c.addListener(listener)
             syncFromPlayer()
+            // Restore the persisted repeat mode on the (re)created player.
+            scope.launch {
+                val saved = MyMusicApp.instance.settings.repeatMode.first()
+                c.repeatMode = saved
+                _repeatMode.value = saved
+            }
             pendingQueue?.let { (tracks, index) ->
                 pendingQueue = null
                 playQueue(tracks, index)
@@ -112,6 +130,17 @@ object PlayerController {
             while (true) {
                 delay(500)
                 val c = controller ?: continue
+                // Sleep timer countdown / expiry.
+                val deadline = sleepDeadlineMs
+                if (deadline != null) {
+                    val remaining = deadline - System.currentTimeMillis()
+                    _sleepRemainingMs.value = remaining.coerceAtLeast(0)
+                    if (remaining <= 0) {
+                        sleepDeadlineMs = null
+                        _sleepRemainingMs.value = null
+                        stopAndExit()
+                    }
+                }
                 if (_state.value.current != null) {
                     _state.value = _state.value.copy(
                         positionMs = c.currentPosition.coerceAtLeast(0),
@@ -161,6 +190,42 @@ object PlayerController {
 
     fun seekTo(positionMs: Long) {
         controller?.seekTo(positionMs.coerceAtLeast(0))
+    }
+
+    /** Cycle repeat mode: off -> one -> all -> off, and persist it. */
+    fun cycleRepeatMode() {
+        val c = controller ?: return
+        val next = (c.repeatMode + 1) % 3
+        c.repeatMode = next
+        _repeatMode.value = next
+        scope.launch { MyMusicApp.instance.settings.setRepeatMode(next) }
+    }
+
+    /** Set a sleep timer in minutes (<=0 cancels). When it fires, playback stops and the app exits. */
+    fun setSleepTimer(minutes: Int) {
+        if (minutes <= 0) {
+            sleepDeadlineMs = null
+            _sleepRemainingMs.value = null
+        } else {
+            sleepDeadlineMs = System.currentTimeMillis() + minutes * 60_000L
+        }
+    }
+
+    /** Stop playback, stop the background service, then leave the app. */
+    private fun stopAndExit() {
+        val c = controller
+        c?.pause()
+        c?.stop()
+        appContext?.let { ctx ->
+            runCatching {
+                ctx.stopService(Intent(ctx, PlaybackService::class.java))
+            }
+        }
+        _state.value = _state.value.copy(isPlaying = false, error = null)
+        scope.launch {
+            delay(400)
+            Process.killProcess(Process.myPid())
+        }
     }
 
     private fun toMediaItem(track: Track): MediaItem =

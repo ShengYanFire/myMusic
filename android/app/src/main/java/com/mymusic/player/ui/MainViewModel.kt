@@ -108,6 +108,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun removeFromPlaylist(playlistId: String, bvid: String) =
         library.removeFromPlaylist(playlistId, bvid)
     suspend fun deletePlaylist(playlistId: String) = library.deletePlaylist(playlistId)
+    suspend fun renamePlaylist(playlistId: String, name: String) =
+        library.renamePlaylist(playlistId, name)
 
     // ---- Settings actions ----
     suspend fun saveCookie(value: String) = settings.setCookie(value)

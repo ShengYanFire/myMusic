@@ -16,11 +16,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -58,10 +61,23 @@ fun LibraryScreen(
         PlaylistDetailScreen(
             playlist = playlist,
             onBack = { selected = null },
-            onPlayAll = { onPlayQueue(playlist.tracks, 0) },
-            onPlay = { list, index -> onPlayQueue(list, index) },
+            onPlayAll = {
+                scope.launch {
+                    vm.showMessage("解析音源中…")
+                    onPlayQueue(resolveAll(vm, playlist.tracks), 0)
+                }
+            },
+            onPlay = { list, index ->
+                scope.launch {
+                    vm.showMessage("解析音源中…")
+                    onPlayQueue(resolveAll(vm, list), index)
+                }
+            },
             onRemove = { bvid ->
                 scope.launch { vm.removeFromPlaylist(playlist.id, bvid) }
+            },
+            onRename = { name ->
+                scope.launch { vm.renamePlaylist(playlist.id, name) }
             },
             onDelete = {
                 scope.launch {
@@ -90,7 +106,12 @@ fun LibraryScreen(
         when (tab) {
             0 -> FavoritesContent(
                 favorites = favorites,
-                onPlay = onPlayTrack,
+                onPlay = { track ->
+                    scope.launch {
+                        vm.showMessage("解析音源中…")
+                        onPlayTrack(resolveOne(vm, track))
+                    }
+                },
                 onRemove = { track -> scope.launch { vm.toggleFavorite(track) } },
             )
             else -> PlaylistsContent(
@@ -201,8 +222,10 @@ private fun PlaylistDetailScreen(
     onPlayAll: () -> Unit,
     onPlay: (List<Track>, Int) -> Unit,
     onRemove: (String) -> Unit,
+    onRename: (String) -> Unit,
     onDelete: () -> Unit,
 ) {
+    var showRenameDialog by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
@@ -223,6 +246,9 @@ private fun PlaylistDetailScreen(
                 enabled = playlist.tracks.isNotEmpty(),
             ) {
                 Icon(Icons.Filled.PlayArrow, contentDescription = "全部播放")
+            }
+            IconButton(onClick = { showRenameDialog = true }) {
+                Icon(Icons.Filled.Edit, contentDescription = "重命名歌单")
             }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Filled.Delete, contentDescription = "删除歌单")
@@ -246,4 +272,49 @@ private fun PlaylistDetailScreen(
             }
         }
     }
+
+    if (showRenameDialog) {
+        RenamePlaylistDialog(
+            initial = playlist.name,
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { name ->
+                onRename(name)
+                showRenameDialog = false
+            },
+        )
+    }
 }
+
+@Composable
+private fun RenamePlaylistDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名歌单") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                placeholder = { Text("歌单名称") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name.trim()) }) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** Re-resolve a track's audio URL (stored library URLs expire over time). */
+private suspend fun resolveOne(vm: MainViewModel, track: Track): Track =
+    runCatching { vm.resolveAudio(track) }.getOrElse { track }
+
+private suspend fun resolveAll(vm: MainViewModel, tracks: List<Track>): List<Track> =
+    tracks.map { runCatching { vm.resolveAudio(it) }.getOrElse { it } }

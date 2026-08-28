@@ -82,6 +82,17 @@ class LibraryStore(private val context: Context) {
         context.libraryDataStore.edit { it[playlistsKey] = gson.toJson(current) }
     }
 
+    suspend fun renamePlaylist(playlistId: String, newName: String) {
+        val name = newName.trim()
+        if (name.isEmpty()) return
+        val current = playlists.first().toMutableList()
+        val index = current.indexOfFirst { it.id == playlistId }
+        if (index >= 0) {
+            current[index] = current[index].copy(name = name)
+            context.libraryDataStore.edit { it[playlistsKey] = gson.toJson(current) }
+        }
+    }
+
     private fun parse(raw: String): List<Track> =
         runCatching {
             gson.fromJson(raw, Array<Track>::class.java)?.toList() ?: emptyList()

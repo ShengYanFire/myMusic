@@ -19,8 +19,11 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -44,6 +47,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import com.mymusic.player.data.Playlist
 import com.mymusic.player.domain.Track
@@ -54,12 +58,15 @@ import kotlinx.coroutines.launch
 fun NowPlayingScreen(vm: MainViewModel) {
     val state by PlayerController.state.collectAsState()
     val current = state.current
+    val repeatMode by PlayerController.repeatMode.collectAsState()
+    val sleepRemaining by PlayerController.sleepRemainingMs.collectAsState()
     val favorites by vm.favorites.collectAsState()
     val playlists by vm.playlists.collectAsState()
     val scope = rememberCoroutineScope()
 
     var showPlaylistDialog by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
+    var showSleepDialog by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         if (current == null) {
@@ -109,7 +116,52 @@ fun NowPlayingScreen(vm: MainViewModel) {
                     )
                 }
 
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { PlayerController.cycleRepeatMode() }) {
+                        Icon(
+                            if (repeatMode == Player.REPEAT_MODE_ONE) {
+                                Icons.Filled.RepeatOne
+                            } else {
+                                Icons.Filled.Repeat
+                            },
+                            contentDescription = when (repeatMode) {
+                                Player.REPEAT_MODE_ONE -> "单曲循环"
+                                Player.REPEAT_MODE_ALL -> "列表循环"
+                                else -> "顺序播放"
+                            },
+                            tint = if (repeatMode > 0) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                    IconButton(onClick = { showSleepDialog = true }) {
+                        Icon(
+                            Icons.Filled.Timer,
+                            contentDescription = "定时停止播放",
+                            tint = if (sleepRemaining != null) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                    sleepRemaining?.let {
+                        Text(
+                            "定时 ${formatMs(it)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
 
                 val maxMs = state.durationMs.coerceAtLeast(1L)
                 Slider(
@@ -204,6 +256,50 @@ fun NowPlayingScreen(vm: MainViewModel) {
             },
         )
     }
+
+    if (showSleepDialog) {
+        SleepTimerDialog(
+            onDismiss = { showSleepDialog = false },
+            onPick = { minutes ->
+                PlayerController.setSleepTimer(minutes)
+                showSleepDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+fun SleepTimerDialog(
+    onDismiss: () -> Unit,
+    onPick: (Int) -> Unit,
+) {
+    val options = listOf(
+        "关闭定时" to 0,
+        "10 分钟" to 10,
+        "30 分钟" to 30,
+        "60 分钟" to 60,
+        "90 分钟" to 90,
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("定时停止播放") },
+        text = {
+            Column {
+                options.forEach { (label, minutes) ->
+                    TextButton(
+                        onClick = { onPick(minutes) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(label)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable
