@@ -317,4 +317,4 @@ private suspend fun resolveOne(vm: MainViewModel, track: Track): Track =
     runCatching { vm.resolveAudio(track) }.getOrElse { track }
 
 private suspend fun resolveAll(vm: MainViewModel, tracks: List<Track>): List<Track> =
-    tracks.map { runCatching { vm.resolveAudio(it) }.getOrElse { it } }
+    tracks.map { t -> runCatching { vm.resolveAudio(t) }.getOrElse { t } }
