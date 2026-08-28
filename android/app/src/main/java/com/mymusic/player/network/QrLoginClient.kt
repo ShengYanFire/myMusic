@@ -3,6 +3,9 @@ package com.mymusic.player.network
 import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -19,10 +22,31 @@ import java.util.concurrent.TimeUnit
  */
 class QrLoginClient {
 
+    // Persist cookies (e.g. buvid3) set by the generate response so the poll
+    // request isn't flagged as a bot by passport.bilibili.com's risk control.
+    private val cookieStore = mutableMapOf<String, List<Cookie>>()
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .cookieJar(object : CookieJar {
+            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                cookieStore[url.host] = cookies
+            }
+
+            override fun loadForRequest(url: HttpUrl): List<Cookie> =
+                cookieStore[url.host] ?: emptyList()
+        })
         .build()
+
+    /** Browser-ish headers so passport.bilibili.com doesn't treat us as a bot. */
+    private fun Request.Builder.browserHeaders(): Request.Builder =
+        this
+            .header("User-Agent", UA)
+            .header("Referer", "https://passport.bilibili.com/login")
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Origin", "https://passport.bilibili.com")
 
     /** A generated login session: QR content to render + polling key. */
     data class QrSession(val url: String, val key: String)
@@ -54,8 +78,7 @@ class QrLoginClient {
     private fun generateOnce(method: String): QrSession {
         val builder = Request.Builder()
             .url("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
-            .header("User-Agent", UA)
-            .header("Referer", "https://passport.bilibili.com/login")
+            .browserHeaders()
         val request = if (method == "POST") {
             builder.post(ByteArray(0).toRequestBody()).build()
         } else {
@@ -81,8 +104,7 @@ class QrLoginClient {
             "?qrcode_key=" + URLEncoder.encode(key, "UTF-8")
         val req = Request.Builder()
             .url(url)
-            .header("User-Agent", UA)
-            .header("Referer", "https://passport.bilibili.com/login")
+            .browserHeaders()
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("登录轮询返回 HTTP ${resp.code}")
@@ -119,6 +141,7 @@ class QrLoginClient {
     }
 
     companion object {
-        private const val UA = "Mozilla/5.0 (Linux; Android 13) MyMusic/1.0"
+        private const val UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36"
     }
 }

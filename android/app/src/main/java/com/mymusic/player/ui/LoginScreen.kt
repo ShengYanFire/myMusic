@@ -80,25 +80,38 @@ fun LoginScreen(vm: MainViewModel, onClose: () -> Unit) {
     // Poll while a QR is on screen.
     LaunchedEffect(sessionKey) {
         val key = sessionKey ?: return@LaunchedEffect
+        var failures = 0
         while (isActive) {
-            val result = runCatching { client.poll(key) }.getOrElse { null }
-            when (result) {
+            val result = runCatching { client.poll(key) }
+            when (val pollResult = result.getOrNull()) {
                 is QrLoginClient.Result.Success -> {
-                    scope.launch { vm.saveCookie(result.cookie) }
+                    scope.launch { vm.saveCookie(pollResult.cookie) }
                     vm.showMessage("登录成功，已保存 Cookie")
                     onClose()
                     return@LaunchedEffect
                 }
-                QrLoginClient.Result.Pending -> status = "请用哔哩哔哩 App 扫码"
-                QrLoginClient.Result.Scanned -> status = "已扫码，请在手机上确认登录"
+                QrLoginClient.Result.Pending -> {
+                    failures = 0
+                    status = "请用哔哩哔哩 App 扫码"
+                }
+                QrLoginClient.Result.Scanned -> {
+                    failures = 0
+                    status = "已扫码，请在手机上确认登录"
+                }
                 QrLoginClient.Result.Expired -> {
                     status = "二维码已失效，请刷新"
                     return@LaunchedEffect
                 }
                 null -> {
-                    error = "网络异常，请点击刷新重试"
-                    status = ""
-                    return@LaunchedEffect
+                    // Transient network hiccup: retry a few times before giving up.
+                    failures++
+                    if (failures >= 3) {
+                        error = result.exceptionOrNull()?.message
+                            ?: "网络异常，请点击刷新重试"
+                        status = ""
+                        return@LaunchedEffect
+                    }
+                    status = "连接中…"
                 }
             }
             delay(2000)
