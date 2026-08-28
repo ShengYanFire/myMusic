@@ -61,7 +61,7 @@ class QrLoginClient {
         } else {
             builder.build()
         }
-        client.newCall(request).execute().use { resp ->
+        return client.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("登录接口返回 HTTP ${resp.code}")
             val obj = JsonParser.parseString(resp.body?.string() ?: "").asJsonObject
             val data = obj.getAsJsonObject("data")
