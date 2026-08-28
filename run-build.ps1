@@ -51,11 +51,19 @@ $env:Path = (Join-Path $jdk 'bin') + ';' + $env:Path
 Write-Host "[1/3] JDK = $jdk"
 
 # ---------- 2) Android SDK ----------
-$sdk = 'D:\Android\Sdk'
+$sdk = $null
 $lp = Join-Path $androidDir 'local.properties'
 if (Test-Path $lp) {
     $m = Select-String -Path $lp -Pattern '^sdk\.dir=(.+)$'
-    if ($m) { $sdk = $m.Matches[0].Groups[1].Value.Trim() }
+    if ($m) {
+        $sdk = $m.Matches[0].Groups[1].Value.Trim()
+        # AS writes Java-properties escaping: C\:\\Users\\... -> C:\Users\...
+        $sdk = $sdk -replace '\\:', ':' -replace '\\\\', '\'
+    }
+}
+if (-not $sdk) {
+    $def = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+    $sdk = if (Test-Path $def) { $def } else { 'D:\Android\Sdk' }
 }
 $env:ANDROID_HOME = $sdk
 $env:ANDROID_SDK_ROOT = $sdk
