@@ -1,5 +1,8 @@
 package com.mymusic.player.network
 
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -112,14 +115,20 @@ class QrLoginClient {
             val obj = JsonParser.parseString(resp.body?.string() ?: "").asJsonObject
             when (val code = obj.get("code")?.asInt ?: -1) {
                 0 -> {
-                    val urlCookies = obj.getAsJsonObject("data")
-                        ?.get("url")?.asString
-                        ?.let { extractCookies(it) }
-                        .orEmpty()
-                    // Recent Bilibili flows may deliver the login cookies via
-                    // Set-Cookie response headers instead of the redirect URL.
-                    val cookie = urlCookies.ifBlank { extractCookiesFromHeaders(setCookies) }
-                    if (cookie.isBlank()) throw RuntimeException("登录成功但未解析到 Cookie")
+                    val data = obj.getAsJsonObject("data")
+                    val url = data?.get("url")?.asString
+                    val urlCookies = url?.let { extractCookies(it) }.orEmpty()
+                    val headerCookies = extractCookiesFromHeaders(setCookies)
+                    val jsonCookies = extractCookiesFromJson(obj)
+                    val cookie = urlCookies.ifBlank { headerCookies }.ifBlank { jsonCookies }
+                    if (cookie.isBlank()) {
+                        val reason = buildString {
+                            append("url=${if (url == null) "缺失" else if (urlCookies.isBlank()) "无Cookie" else "OK"}; ")
+                            append("setCookie=${if (setCookies.isEmpty()) "无" else if (headerCookies.isBlank()) "无匹配" else "OK"}; ")
+                            append("body=${if (jsonCookies.isBlank()) "无Cookie" else "OK"}")
+                        }
+                        throw RuntimeException("登录成功但未解析到 Cookie：$reason")
+                    }
                     Result.Success(cookie)
                 }
                 86101 -> Result.Pending
@@ -158,6 +167,28 @@ class QrLoginClient {
             val value = first.substringAfter('=', "").trim()
             if (key in wanted && value.isNotEmpty()) found[key] = value
         }
+        return wanted.mapNotNull { key -> found[key]?.let { "$key=$it" } }
+            .joinToString("; ")
+    }
+
+    /** Scan the whole response JSON for the three cookie keys wherever they appear. */
+    private fun extractCookiesFromJson(root: JsonElement): String {
+        val wanted = listOf("SESSDATA", "bili_jct", "DedeUserID")
+        val found = mutableMapOf<String, String>()
+        fun walk(element: JsonElement) {
+            when (element) {
+                is JsonObject -> element.entrySet().forEach { (k, v) ->
+                    if (k in wanted && v.isJsonPrimitive && v.asString.isNotEmpty()) {
+                        found[k] = v.asString
+                    } else {
+                        walk(v)
+                    }
+                }
+                is JsonArray -> element.forEach { walk(it) }
+                else -> {}
+            }
+        }
+        walk(root)
         return wanted.mapNotNull { key -> found[key]?.let { "$key=$it" } }
             .joinToString("; ")
     }
