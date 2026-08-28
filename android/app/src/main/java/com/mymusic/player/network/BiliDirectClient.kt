@@ -91,15 +91,22 @@ class BiliDirectClient(private val settings: AppSettings) {
         )
     }
 
-    /** Connectivity check: fetch WBI keys from /nav. */
+    /** Connectivity check: fetch WBI keys from /nav (works even when logged out). */
     suspend fun ping(): Boolean =
-        runCatching { get("/x/web-interface/nav", emptyMap(), signed = false) }.isSuccess
+        runCatching {
+            get("/x/web-interface/nav", emptyMap(), signed = false, allowLoggedOut = true)
+        }.isSuccess
 
     // ------------------------------------------------------------------
     //  HTTP core + WBI signing
     // ------------------------------------------------------------------
 
-    private suspend fun get(path: String, params: Map<String, Any>, signed: Boolean): JsonObject =
+    private suspend fun get(
+        path: String,
+        params: Map<String, Any>,
+        signed: Boolean,
+        allowLoggedOut: Boolean = false,
+    ): JsonObject =
         withContext(Dispatchers.IO) {
             // Build the query string ALREADY percent-encoded, then pass the whole
             // URL to OkHttp which parses it as-is (no double-encoding).
@@ -134,7 +141,9 @@ class BiliDirectClient(private val settings: AppSettings) {
                 val text = resp.body?.string() ?: throw RuntimeException("B 站返回空响应")
                 val obj = JsonParser.parseString(text).asJsonObject
                 val code = obj.get("code")?.asInt ?: -1
-                if (code != 0) {
+                // /nav returns -101 "账号未登录" for guests, but still carries the
+                // wbi_img keys in data — so tolerate it where login isn't required.
+                if (code != 0 && !(allowLoggedOut && code == -101)) {
                     val msg = obj.get("message")?.asString ?: "未知错误"
                     throw RuntimeException("B 站接口错误（$code）$msg")
                 }
@@ -145,7 +154,9 @@ class BiliDirectClient(private val settings: AppSettings) {
     private suspend fun wbiKeys(): WbiKeys {
         val now = System.currentTimeMillis()
         if (wbi != null && now - wbiFetchedAt < WBI_TTL) return wbi!!
-        val img = get("/x/web-interface/nav", emptyMap(), signed = false)
+        val img = get(
+            "/x/web-interface/nav", emptyMap(), signed = false, allowLoggedOut = true,
+        )
             .obj("data")
             .obj("wbi_img")
         val imgUrl = img.str("img_url")
