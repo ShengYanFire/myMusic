@@ -42,15 +42,26 @@ class QrLoginClient {
         data class Success(val cookie: String) : Result()
     }
 
-    /** Create a new QR login session. */
+    /** Create a new QR login session. GET is the current Bilibili contract; POST falls back if Bilibili switches back. */
     suspend fun generate(): QrSession = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
+        try {
+            generateOnce("GET")
+        } catch (e: RuntimeException) {
+            if (e.message?.contains("405") == true) generateOnce("POST") else throw e
+        }
+    }
+
+    private fun generateOnce(method: String): QrSession {
+        val builder = Request.Builder()
             .url("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
-            .post(ByteArray(0).toRequestBody())
             .header("User-Agent", UA)
-            .header("Referer", "https://www.bilibili.com/")
-            .build()
-        client.newCall(req).execute().use { resp ->
+            .header("Referer", "https://passport.bilibili.com/login")
+        val request = if (method == "POST") {
+            builder.post(ByteArray(0).toRequestBody()).build()
+        } else {
+            builder.build()
+        }
+        client.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("登录接口返回 HTTP ${resp.code}")
             val obj = JsonParser.parseString(resp.body?.string() ?: "").asJsonObject
             val data = obj.getAsJsonObject("data")
@@ -71,7 +82,7 @@ class QrLoginClient {
         val req = Request.Builder()
             .url(url)
             .header("User-Agent", UA)
-            .header("Referer", "https://www.bilibili.com/")
+            .header("Referer", "https://passport.bilibili.com/login")
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("登录轮询返回 HTTP ${resp.code}")
