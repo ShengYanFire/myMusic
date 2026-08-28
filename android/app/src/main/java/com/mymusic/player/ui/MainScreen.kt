@@ -34,7 +34,6 @@ object Routes {
     const val NOW_PLAYING = "now_playing"
     const val LIBRARY = "library"
     const val SETTINGS = "settings"
-    const val LOGIN = "login"
 }
 
 private data class NavItem(val route: String, val label: String, val icon: ImageVector)
@@ -121,13 +120,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 )
             }
             composable(Routes.SETTINGS) {
-                SettingsScreen(
-                    vm = vm,
-                    onOpenLogin = { navController.navigate(Routes.LOGIN) },
-                )
-            }
-            composable(Routes.LOGIN) {
-                LoginScreen(vm = vm, onClose = { navController.popBackStack() })
+                SettingsScreen(vm = vm)
             }
         }
     }

@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(vm: MainViewModel, onOpenLogin: () -> Unit) {
+fun SettingsScreen(vm: MainViewModel) {
     val cookie by vm.cookie.collectAsState()
     val quality by vm.quality.collectAsState()
     val scope = rememberCoroutineScope()
@@ -50,19 +50,6 @@ fun SettingsScreen(vm: MainViewModel, onOpenLogin: () -> Unit) {
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
     ) {
-        Button(
-            onClick = onOpenLogin,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("扫码登录 B 站（用哔哩哔哩 App 授权）")
-        }
-        Text(
-            "用哔哩哔哩 App 扫码授权，自动获取并保存 Cookie。不登录也可直接使用（游客模式）。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        Spacer(Modifier.height(20.dp))
         Text("B 站 Cookie（可选）", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
             value = cookieInput,
