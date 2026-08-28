@@ -124,7 +124,7 @@ fun LoginScreen(vm: MainViewModel, onClose: () -> Unit) {
         Box(
             Modifier
                 .size(240.dp)
-                .background(Color.WHITE)
+                .background(androidx.compose.ui.graphics.Color.White)
                 .padding(12.dp),
             contentAlignment = Alignment.Center,
         ) {
