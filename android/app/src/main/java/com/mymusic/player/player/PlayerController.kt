@@ -2,8 +2,10 @@ package com.mymusic.player.player
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import com.google.common.util.concurrent.MoreExecutors
@@ -30,6 +32,8 @@ data class PlayerUiState(
  */
 object PlayerController {
 
+    private const val TAG = "MyMusicPlayer"
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var appContext: Context? = null
@@ -42,6 +46,14 @@ object PlayerController {
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _state.value = _state.value.copy(isPlaying = isPlaying)
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            Log.e(
+                TAG,
+                "播放错误 errorCode=${error.errorCode} " +
+                    "message=${error.message} cause=${error.cause}",
+            )
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -109,6 +121,8 @@ object PlayerController {
             return
         }
         val items = tracks.map { toMediaItem(it) }
+        val start = tracks.getOrNull(startIndex)
+        Log.d(TAG, "playQueue bvid=${start?.bvid} url=${start?.audioUrl}")
         c.setMediaItems(items, startIndex.coerceIn(0, items.lastIndex.coerceAtLeast(0)), 0L)
         c.prepare()
         c.play()
