@@ -99,6 +99,16 @@ fun NowPlayingScreen(vm: MainViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
+                state.error?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+
                 Spacer(Modifier.height(24.dp))
 
                 val maxMs = state.durationMs.coerceAtLeast(1L)

@@ -24,6 +24,7 @@ data class PlayerUiState(
     val isPlaying: Boolean = false,
     val positionMs: Long = 0,
     val durationMs: Long = 0,
+    val error: String? = null,
 )
 
 /**
@@ -54,9 +55,15 @@ object PlayerController {
                 "播放错误 errorCode=${error.errorCode} " +
                     "message=${error.message} cause=${error.cause}",
             )
+            val causeMsg = error.cause?.message ?: error.message ?: "未知错误"
+            _state.value = _state.value.copy(
+                error = "播放失败（错误码 ${error.errorCode}）：$causeMsg",
+                isPlaying = false,
+            )
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            _state.value = _state.value.copy(error = null)
             syncFromPlayer()
         }
 
@@ -131,6 +138,7 @@ object PlayerController {
             isPlaying = true,
             positionMs = 0,
             durationMs = 0,
+            error = null,
         )
     }
 
