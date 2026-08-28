@@ -1,12 +1,12 @@
 pluginManagement {
     repositories {
-        // 国内镜像（优先：阿里云）
+        // China mirrors first (Aliyun)
         maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/public") }
-        // 华为云镜像（兜底）
+        // Huawei Cloud mirror (fallback)
         maven { url = uri("https://mirrors.huaweicloud.com/repository/maven/") }
-        // 官方源（最后兜底）
+        // Official repos (last resort)
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -21,12 +21,12 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        // 国内镜像（优先：阿里云）
+        // China mirrors first (Aliyun)
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/public") }
-        // 华为云镜像（兜底）
+        // Huawei Cloud mirror (fallback)
         maven { url = uri("https://mirrors.huaweicloud.com/repository/maven/") }
-        // 官方源（最后兜底）
+        // Official repos (last resort)
         google()
         mavenCentral()
     }
