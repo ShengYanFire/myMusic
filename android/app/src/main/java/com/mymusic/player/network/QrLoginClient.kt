@@ -1,5 +1,6 @@
 package com.mymusic.player.network
 
+import android.util.Log
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
@@ -120,7 +121,15 @@ class QrLoginClient {
                     val urlCookies = url?.let { extractCookies(it) }.orEmpty()
                     val headerCookies = extractCookiesFromHeaders(setCookies)
                     val jsonCookies = extractCookiesFromJson(obj)
-                    val cookie = urlCookies.ifBlank { headerCookies }.ifBlank { jsonCookies }
+                    var cookie = urlCookies.ifBlank { headerCookies }.ifBlank { jsonCookies }
+
+                    if (cookie.isBlank()) {
+                        // Newer flows issue the login cookies via Set-Cookie when
+                        // the success redirect URL is followed.
+                        Log.d(TAG, "qr success body=$obj\nurl=$url\nsetCookie=$setCookies")
+                        cookie = url?.let { fetchCookiesFromUrl(it) }.orEmpty()
+                    }
+
                     if (cookie.isBlank()) {
                         val reason = buildString {
                             append("url=${if (url == null) "缺失" else if (urlCookies.isBlank()) "无Cookie" else "OK"}; ")
@@ -193,7 +202,40 @@ class QrLoginClient {
             .joinToString("; ")
     }
 
+    /**
+     * Follow the success redirect URL (redirects are followed automatically) and
+     * collect login cookies from every Set-Cookie encountered along the way via
+     * the shared CookieJar.
+     */
+    private fun fetchCookiesFromUrl(loginUrl: String): String {
+        val req = Request.Builder()
+            .url(loginUrl)
+            .browserHeaders()
+            .build()
+        return try {
+            client.newCall(req).execute().use { resp ->
+                val cookies = resp.headers("Set-Cookie")
+                Log.d(TAG, "follow ${resp.request.url} -> ${resp.code}; setCookie=$cookies")
+                extractCookiesFromCookies(cookieStore[resp.request.url.host] ?: emptyList())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "follow url failed: $e")
+            ""
+        }
+    }
+
+    private fun extractCookiesFromCookies(cookies: List<Cookie>): String {
+        val wanted = listOf("SESSDATA", "bili_jct", "DedeUserID")
+        val found = mutableMapOf<String, String>()
+        for (c in cookies) {
+            if (c.name in wanted && c.value.isNotEmpty()) found[c.name] = c.value
+        }
+        return wanted.mapNotNull { key -> found[key]?.let { "$key=$it" } }
+            .joinToString("; ")
+    }
+
     companion object {
+        private const val TAG = "QrLogin"
         private const val UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36"
     }
