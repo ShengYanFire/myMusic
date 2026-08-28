@@ -35,15 +35,15 @@ my-music/
 
 要求：Android Studio。无需任何服务器。
 
-1. 用 **Android Studio** 打开目录 `my-music/android`，等待 Gradle 同步完成（首次下载 Gradle 8.9 与依赖，几分钟）。
-   - 若提示缺 `gradle-wrapper.jar`：直接点同步，Android Studio 会自动处理；或在命令行运行 `gradle wrapper --gradle-version 8.9`。
+1. 用 **Android Studio** 打开目录 `my-music/android`，等待 Gradle 同步完成（首次下载 Gradle 8.14.3 与依赖，几分钟）。
+   - 若提示缺 `gradle-wrapper.jar`：直接点同步，Android Studio 会自动处理；或在命令行运行 `gradle wrapper --gradle-version 8.14.3`。
 2. 连真机（开 USB 调试）或起模拟器，点 **Run ▶**；或出安装包：`Build → Build APK(s)`，产物在 `android/app/build/outputs/apk/`，传到手机安装。
 
 ### 首次构建：JDK / SDK 配置（本机已验证）
 
-> 项目用 **Gradle 8.9 + AGP 8.5.2**，需要 **JDK 17 或 21** 来运行。
+> 项目用 **Gradle 8.14.3 + AGP 8.13.0 + Kotlin 2.2.20**，需要 **JDK 17 或 21** 来运行。
 
-- **⚠️ 不要直接用 AS 自带的 JBR（本机为 JDK 25）跑 Gradle**——Gradle 8.9 不支持 JDK 25，同步会报 "Unsupported Java"。请把 Gradle JDK 指到本机已有的 JDK 17：
+- **⚠️ 不要直接用 AS 自带的 JBR（本机为 JDK 25）跑 Gradle**——Gradle 8.14 不支持 JDK 25，同步会报 "Unsupported Java"。请把 Gradle JDK 指到本机已有的 JDK 17：
   - 本机可复用 **DevEco Studio 自带 JDK 17**：`C:\Program Files\Huawei\DevEco Studio\jbr`（已确认 `javac 17.0.12` 可用，无需下载）。
   - 设置路径：`File → Settings → Build, Execution, Deployment → Build Tools → Gradle → Gradle JDK` → 选该目录（没有就点 **Add JDK…** 添加）。
 - **SDK**：`android/local.properties` 已把 `sdk.dir` 指向 `D:/Android/Sdk`。首次同步时 AS 会提示下载 SDK 组件（Android 14 Platform / Build-Tools 34.0.0 / Platform-Tools）到该目录——**需要联网**，按提示安装即可。

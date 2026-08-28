@@ -1,24 +1,24 @@
 # ============================================================
 #  fix-gradle.ps1 — 用本地下载的 Gradle 发行包修复 wrapper（完全离线）
-#  适用场景：wrapper 报 "Could not resolve gradle:gradle:8.9"
+#  适用场景：wrapper 报 "Could not resolve gradle:gradle:8.14.3"
 #  （即 Gradle 发行包下载不下来）。
 #
-#  前提：先用浏览器下载 gradle-8.9-bin.zip（约 120MB）存到：
-#        D:\gradle-8.9-bin.zip
+#  前提：先用浏览器下载 gradle-8.14.3-bin.zip（约 130MB）存到：
+#        D:\gradle-8.14.3-bin.zip
 #  可用的镜像地址（浏览器里打开即下载，挑一个能下的）：
-#     华为云:  https://mirrors.huaweicloud.com/gradle/gradle-8.9-bin.zip
-#     清华:    https://mirrors.tuna.tsinghua.edu.cn/gradle/gradle-8.9-bin.zip
-#     腾讯云:  https://mirrors.cloud.tencent.com/gradle/gradle-8.9-bin.zip
-#     官方:    https://services.gradle.org/distributions/gradle-8.9-bin.zip
+#     华为云:  https://mirrors.huaweicloud.com/gradle/gradle-8.14.3-bin.zip
+#     清华:    https://mirrors.tuna.tsinghua.edu.cn/gradle/gradle-8.14.3-bin.zip
+#     腾讯云:  https://mirrors.cloud.tencent.com/gradle/gradle-8.14.3-bin.zip
+#     官方:    https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
 #
 #  用法（项目根目录）：
 #     powershell -ExecutionPolicy Bypass -File fix-gradle.ps1
-#     powershell -ExecutionPolicy Bypass -File fix-gradle.ps1 -Zip "D:\别的路径\gradle-8.9-bin.zip"
+#     powershell -ExecutionPolicy Bypass -File fix-gradle.ps1 -Zip "D:\别的路径\gradle-8.14.3-bin.zip"
 #
 #  做完后：重新同步 AS（File → Sync Project with Gradle Files），或直接跑 build.bat。
 # ============================================================
 param(
-    [string]$Zip = 'D:\gradle-8.9-bin.zip'
+    [string]$Zip = 'D:\gradle-8.14.3-bin.zip'
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -26,7 +26,7 @@ $androidDir = Join-Path $root 'android'
 
 if (-not (Test-Path $Zip)) {
     Write-Host "[错误] 找不到 $Zip" -ForegroundColor Red
-    Write-Host '       请先用浏览器从上面的镜像地址下载 gradle-8.9-bin.zip。' -ForegroundColor Yellow
+    Write-Host '       请先用浏览器从上面的镜像地址下载 gradle-8.14.3-bin.zip。' -ForegroundColor Yellow
     exit 1
 }
 
@@ -39,8 +39,8 @@ $env:JAVA_HOME = $jdk
 $env:Path = (Join-Path $jdk 'bin') + ';' + $env:Path
 
 # 1) 解压发行包到临时目录
-$extract = Join-Path $env:TEMP 'gradle-8.9-local'
-$gradle = Join-Path $extract 'gradle-8.9\bin\gradle.bat'
+$extract = Join-Path $env:TEMP 'gradle-8.14.3-local'
+$gradle = Join-Path $extract 'gradle-8.14.3\bin\gradle.bat'
 if (-not (Test-Path $gradle)) {
     Write-Host '解压 Gradle 发行包...'
     Expand-Archive -Path $Zip -DestinationPath $extract -Force
@@ -54,7 +54,7 @@ if (-not (Test-Path $gradle)) {
 Push-Location $androidDir
 try {
     Write-Host '生成 gradle-wrapper.jar ...'
-    & $gradle wrapper --gradle-version 8.9 --no-daemon
+    & $gradle wrapper --gradle-version 8.14.3 --no-daemon
     if ($LASTEXITCODE -ne 0) { Write-Host '[错误] 生成 wrapper 失败。' -ForegroundColor Red; exit $LASTEXITCODE }
 } finally { Pop-Location }
 

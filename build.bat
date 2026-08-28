@@ -12,14 +12,14 @@ if not exist "gradle\wrapper\gradle-wrapper.jar" (
     echo [MyMusic] gradle-wrapper.jar 不存在，尝试生成...
     where gradle >nul 2>nul
     if not errorlevel 1 (
-        gradle wrapper --gradle-version 8.9
+        gradle wrapper --gradle-version 8.14.3
         if errorlevel 1 (
             echo [MyMusic] wrapper 生成失败
             exit /b 1
         )
     ) else (
         echo [MyMusic] 未安装 Gradle。请用 Android Studio 打开 "android" 目录，
-        echo [MyMusic] 等它同步后会自动生成 wrapper；或先安装 Gradle 8.9。
+        echo [MyMusic] 等它同步后会自动生成 wrapper；或先安装 Gradle 8.14.3。
         exit /b 1
     )
 )

@@ -105,10 +105,10 @@ if (-not (Test-Path $wj)) {
     $g = Get-Command gradle -ErrorAction SilentlyContinue
     if ($g) {
         Push-Location $androidDir
-        try { & gradle wrapper --gradle-version 8.9 } finally { Pop-Location }
+        try { & gradle wrapper --gradle-version 8.14.3 } finally { Pop-Location }
     } else {
         try {
-            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar' -OutFile $wj
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/gradle/gradle/v8.14.3/gradle/wrapper/gradle-wrapper.jar' -OutFile $wj
         } catch {
             Write-Host '[错误] 无法获取 gradle-wrapper.jar。请用 Android Studio 打开 android 目录让 AS 自动生成后重试。' -ForegroundColor Red
             exit 1
