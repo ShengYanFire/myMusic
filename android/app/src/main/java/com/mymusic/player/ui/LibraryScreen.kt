@@ -1,6 +1,8 @@
 package com.mymusic.player.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,8 +14,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -24,8 +28,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,40 +39,48 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import com.mymusic.player.data.Playlist
 import com.mymusic.player.domain.Track
+import com.mymusic.player.ui.theme.AppGradients
+import com.mymusic.player.ui.theme.Mint
+import com.mymusic.player.ui.theme.Rose
 import kotlinx.coroutines.launch
 
 @Composable
 fun LibraryScreen(
     vm: MainViewModel,
-    onPlayTrack: (Track) -> Unit,
-    onPlayQueue: (List<Track>, Int) -> Unit,
+    onOpenPlayer: () -> Unit,
 ) {
     val favorites by vm.favorites.collectAsState()
     val playlists by vm.playlists.collectAsState()
     val scope = rememberCoroutineScope()
 
     var tab by remember { mutableStateOf(0) }
-    var selected by remember { mutableStateOf<Playlist?>(null) }
+    var selectedId by remember { mutableStateOf<String?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
 
-    if (selected != null) {
-        val playlist = selected!!
+    // Derive the detail playlist from the live flow so removals / renames
+    // inside the detail screen are reflected immediately (a snapshot would go stale).
+    val selectedPlaylist = selectedId?.let { id -> playlists.firstOrNull { it.id == id } }
+
+    if (selectedPlaylist != null) {
+        val playlist = selectedPlaylist
         PlaylistDetailScreen(
             playlist = playlist,
-            onBack = { selected = null },
+            onBack = { selectedId = null },
             onPlayAll = {
                 scope.launch {
-                    vm.showMessage("解析音源中…")
-                    onPlayQueue(resolveAll(vm, playlist.tracks), 0)
+                    if (vm.playFromList(playlist.tracks)) onOpenPlayer()
                 }
             },
             onPlay = { list, index ->
                 scope.launch {
-                    vm.showMessage("解析音源中…")
-                    onPlayQueue(resolveAll(vm, list), index)
+                    if (vm.playFromList(list, index)) onOpenPlayer()
                 }
             },
             onRemove = { bvid ->
@@ -82,7 +92,7 @@ fun LibraryScreen(
             onDelete = {
                 scope.launch {
                     vm.deletePlaylist(playlist.id)
-                    selected = null
+                    selectedId = null
                 }
             },
         )
@@ -90,33 +100,29 @@ fun LibraryScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        TabRow(selectedTabIndex = tab) {
-            Tab(
-                selected = tab == 0,
-                onClick = { tab = 0 },
-                text = { Text("收藏") },
-            )
-            Tab(
-                selected = tab == 1,
-                onClick = { tab = 1 },
-                text = { Text("歌单") },
-            )
-        }
+        Text(
+            "我的音乐",
+            style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 10.dp),
+        )
+        SegmentedTabs(
+            selected = tab,
+            onSelect = { tab = it },
+        )
 
         when (tab) {
             0 -> FavoritesContent(
                 favorites = favorites,
-                onPlay = { track ->
+                onPlay = { index ->
                     scope.launch {
-                        vm.showMessage("解析音源中…")
-                        onPlayTrack(resolveOne(vm, track))
+                        if (vm.playFromList(favorites, index)) onOpenPlayer()
                     }
                 },
                 onRemove = { track -> scope.launch { vm.toggleFavorite(track) } },
             )
             else -> PlaylistsContent(
                 playlists = playlists,
-                onOpen = { selected = it },
+                onOpen = { selectedId = it.id },
                 onCreate = { showCreateDialog = true },
             )
         }
@@ -135,10 +141,45 @@ fun LibraryScreen(
     }
 }
 
+/** Pill-shaped segmented control with a gradient indicator. */
+@Composable
+private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
+    val options = listOf("收藏", "歌单")
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .padding(4.dp),
+    ) {
+        options.forEachIndexed { i, label ->
+            val isSelected = selected == i
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (isSelected) AppGradients.primaryBrush() else SolidColor(Color.Transparent),
+                    )
+                    .clickable { onSelect(i) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun FavoritesContent(
     favorites: List<Track>,
-    onPlay: (Track) -> Unit,
+    onPlay: (Int) -> Unit,
     onRemove: (Track) -> Unit,
 ) {
     if (favorites.isEmpty()) {
@@ -146,16 +187,24 @@ private fun FavoritesContent(
         return
     }
     LazyColumn(Modifier.fillMaxSize()) {
-        items(favorites, key = { it.bvid }) { track ->
+        item {
+            Text(
+                "${favorites.size} 首收藏",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp),
+            )
+        }
+        itemsIndexed(favorites, key = { _, track -> track.bvid }) { index, track ->
             TrackRow(
                 track = track,
-                onClick = { onPlay(track) },
+                onClick = { onPlay(index) },
                 trailing = {
                     IconButton(onClick = { onRemove(track) }) {
                         Icon(
                             Icons.Filled.Favorite,
                             contentDescription = "取消收藏",
-                            tint = MaterialTheme.colorScheme.primary,
+                            tint = Rose,
                         )
                     }
                 },
@@ -171,13 +220,23 @@ private fun PlaylistsContent(
     onCreate: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        TextButton(
-            onClick = onCreate,
-            modifier = Modifier.padding(horizontal = 8.dp),
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.PlayArrow, contentDescription = null)
-            Spacer(Modifier.width(4.dp))
-            Text("新建歌单")
+            Text(
+                "${playlists.size} 个歌单",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            GradientButton(
+                text = "新建歌单",
+                icon = Icons.AutoMirrored.Filled.QueueMusic,
+                onClick = onCreate,
+            )
         }
         if (playlists.isEmpty()) {
             EmptyHint("暂无歌单", Modifier.fillMaxSize())
@@ -187,17 +246,29 @@ private fun PlaylistsContent(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 5.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
                             .clickable { onOpen(playlist) }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(
-                            Icons.Filled.PlayArrow,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
+                        Box(
+                            Modifier
+                                .size(48.dp)
+                                .shadow(6.dp, RoundedCornerShape(14.dp))
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(AppGradients.primaryBrush()),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.QueueMusic,
+                                contentDescription = null,
+                                tint = Color.White,
+                            )
+                        }
                         Spacer(Modifier.width(12.dp))
-                        Column {
+                        Column(Modifier.weight(1f)) {
                             Text(
                                 playlist.name,
                                 style = MaterialTheme.typography.bodyLarge,
@@ -208,6 +279,11 @@ private fun PlaylistsContent(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = "播放",
+                            tint = Mint,
+                        )
                     }
                 }
             }
@@ -230,7 +306,7 @@ private fun PlaylistDetailScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+                .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
@@ -245,7 +321,7 @@ private fun PlaylistDetailScreen(
                 onClick = onPlayAll,
                 enabled = playlist.tracks.isNotEmpty(),
             ) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = "全部播放")
+                Icon(Icons.Filled.PlayArrow, contentDescription = "全部播放", tint = Mint)
             }
             IconButton(onClick = { showRenameDialog = true }) {
                 Icon(Icons.Filled.Edit, contentDescription = "重命名歌单")
@@ -259,6 +335,27 @@ private fun PlaylistDetailScreen(
             return@Column
         }
         LazyColumn(Modifier.fillMaxSize()) {
+            item {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${playlist.tracks.size} 首",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    GradientButton(
+                        text = "全部播放",
+                        icon = Icons.Filled.PlayArrow,
+                        onClick = onPlayAll,
+                        enabled = playlist.tracks.isNotEmpty(),
+                    )
+                }
+            }
             itemsIndexed(playlist.tracks, key = { _, track -> track.bvid }) { index, track ->
                 TrackRow(
                     track = track,
@@ -311,10 +408,3 @@ private fun RenamePlaylistDialog(
         },
     )
 }
-
-/** Re-resolve a track's audio URL (stored library URLs expire over time). */
-private suspend fun resolveOne(vm: MainViewModel, track: Track): Track =
-    runCatching { vm.resolveAudio(track) }.getOrElse { track }
-
-private suspend fun resolveAll(vm: MainViewModel, tracks: List<Track>): List<Track> =
-    tracks.map { t -> runCatching { vm.resolveAudio(t) }.getOrElse { t } }

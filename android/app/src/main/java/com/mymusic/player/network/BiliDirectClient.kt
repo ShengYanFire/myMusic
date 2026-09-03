@@ -64,6 +64,36 @@ class BiliDirectClient(private val settings: AppSettings) {
         }
     }
 
+    /**
+     * Music-trending videos (B站音乐分区排行榜, public unsigned endpoint).
+     * One of three sources mixed into the "推荐" feed.
+     */
+    suspend fun musicRanking(limit: Int = 100): List<SearchItem> {
+        val body = get(
+            "/x/web-interface/ranking/v2",
+            mapOf("rid" to 3),
+            signed = false,
+        )
+        val list = body.obj("data").getAsJsonArray("list") ?: return emptyList()
+        return list.mapNotNull { toSearchItem(it.asJsonObject) }.take(limit)
+    }
+
+    /**
+     * Music sub-area 3-day ranking (音乐综合 rid=30, public unsigned endpoint).
+     * Second source of the "推荐" mix.
+     */
+    suspend fun musicSubRanking(limit: Int = 50): List<SearchItem> {
+        val body = get(
+            "/x/web-interface/ranking/region",
+            mapOf("rid" to 30, "day" to 3),
+            signed = false,
+        )
+        // This endpoint returns the ranked list as a top-level array under data.
+        val arr = body.get("data")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: return emptyList()
+        return arr.mapNotNull { toSearchItem(it.asJsonObject) }.take(limit)
+    }
+
     /** Video detail (needed to get the cid for page 1). */
     suspend fun videoInfo(bvid: String): VideoInfo {
         val d = get("/x/web-interface/view", mapOf("bvid" to bvid), signed = false)
@@ -71,7 +101,9 @@ class BiliDirectClient(private val settings: AppSettings) {
         return VideoInfo(bvid = d.str("bvid"), cid = d.get("cid").longOrNull())
     }
 
-    /** Best audio-only DASH stream; quality "low" = least data. */
+    /** Best audio-only DASH stream; quality "low" = least data. Returns the
+     *  picked URL plus every available mirror/backup and lower tier so the
+     *  player can degrade gracefully when a CDN node 403s. */
     suspend fun audioStream(bvid: String, cid: Long, quality: String): AudioInfo {
         val body = get(
             "/x/player/wbi/playurl",
@@ -85,10 +117,25 @@ class BiliDirectClient(private val settings: AppSettings) {
             throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
         }
         val sorted = list.sortedBy { it.get("bandwidth").longOr() }
-        val pick = if (quality == "low") sorted.first() else sorted.last()
+        // Build the candidate list best-first: for "high" the highest bandwidth
+        // tier first, for "low" the lowest first; each tier contributes its
+        // baseUrl + backupUrl mirrors (different CDN nodes) before the next tier.
+        val ordered = if (quality == "low") sorted else sorted.reversed()
+        val urls = LinkedHashSet<String>()
+        for (t in ordered) {
+            t.str("baseUrl").takeIf { it.isNotBlank() }?.let { urls.add(it) }
+            t.getAsJsonArray("backupUrl")?.forEach { el ->
+                el.asString.takeIf { it.isNotBlank() }?.let { urls.add(it) }
+            }
+        }
+        if (urls.isEmpty()) {
+            throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
+        }
+        val first = list.first()
         return AudioInfo(
-            url = pick.str("baseUrl"),
-            duration = pick.get("duration").longOrNull()
+            url = urls.first(),
+            urls = urls.toList(),
+            duration = first.get("duration").longOrNull()
                 ?: dash.get("duration").longOrNull(),
         )
     }
@@ -98,6 +145,35 @@ class BiliDirectClient(private val settings: AppSettings) {
         runCatching {
             get("/x/web-interface/nav", emptyMap(), signed = false, allowLoggedOut = true)
         }.isSuccess
+
+    /**
+     * Subtitle tracks of a video (CC + AI 字幕) from /x/player/wbi/v2 —
+     * the lyric source for the lyrics page. Empty when the video has none
+     * (very common); AI entries often additionally require the login cookie.
+     */
+    suspend fun subtitleList(bvid: String, cid: Long): List<BiliSubtitle> {
+        val body = get(
+            "/x/player/wbi/v2",
+            mapOf("bvid" to bvid, "cid" to cid),
+            signed = true,
+        )
+        val subtitle = body.objOrNull("data")?.getAsJsonObject("subtitle")
+            ?: return emptyList()
+        val arr = subtitle.get("subtitles")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: return emptyList()
+        return arr.mapNotNull { el ->
+            if (!el.isJsonObject) return@mapNotNull null
+            val o = el.asJsonObject
+            val url = normalizePic(o.str("subtitle_url"))
+            if (url.isBlank()) return@mapNotNull null
+            BiliSubtitle(
+                lan = o.str("lan"),
+                lanDoc = o.str("lan_doc"),
+                url = url,
+                aiType = o.get("ai_type").intOr(),
+            )
+        }
+    }
 
     // ------------------------------------------------------------------
     //  HTTP core + WBI signing
@@ -212,6 +288,29 @@ class BiliDirectClient(private val settings: AppSettings) {
     private fun JsonObject.obj(name: String): JsonObject =
         getAsJsonObject(name) ?: throw RuntimeException("B 站响应缺少 $name")
 
+    private fun JsonObject.objOrNull(name: String): JsonObject? =
+        if (has(name) && get(name).isJsonObject) getAsJsonObject(name) else null
+
+    /**
+     * Map any video object (search / ranking v2 / ranking region / popular) to
+     * a [SearchItem], tolerating the two author/play shapes Bilibili uses:
+     * direct `author`/`play` fields (old ranking, region) vs `owner`/`stat`
+     * nested objects (ranking v2, popular, search).
+     */
+    private fun toSearchItem(o: JsonObject): SearchItem? {
+        val bvid = o.str("bvid")
+        if (bvid.isBlank()) return null
+        return SearchItem(
+            bvid = bvid,
+            title = stripHtml(o.str("title")),
+            pic = normalizePic(o.str("pic")),
+            duration = o.get("duration").intOr(),
+            author = o.str("author").ifBlank { o.objOrNull("owner")?.str("name").orEmpty() },
+            play = o.get("play").longOrNull()
+                ?: o.objOrNull("stat")?.get("view")?.longOrNull(),
+        )
+    }
+
     private fun JsonObject.str(name: String): String = get(name)?.asString ?: ""
 
     /**
@@ -242,7 +341,12 @@ class BiliDirectClient(private val settings: AppSettings) {
 
     companion object {
         private const val WBI_TTL = 10 * 60 * 1000L
-        const val UA = "Mozilla/5.0 (Linux; Android 13) MyMusic/1.0"
+        // Desktop Chrome UA: the playurl/WBI APIs and third-party CDN nodes
+        // behave differently (estg* nodes 403 mobile agents), so present as a
+        // desktop browser for the whole request path.
+        const val UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         private val MIXIN_TAB = intArrayOf(
             46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,

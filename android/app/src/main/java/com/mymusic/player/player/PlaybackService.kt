@@ -7,12 +7,14 @@ import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionToken
 import com.mymusic.player.MyMusicApp
+import com.mymusic.player.network.BiliDirectClient
 import com.mymusic.player.ui.MainActivity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -37,21 +39,38 @@ class PlaybackService : MediaSessionService() {
 
         val defaultHeaders = buildMap {
             put("Referer", "https://www.bilibili.com/")
-            put(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) " +
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 " +
-                    "Chrome/120.0.0.0 Mobile Safari/537.36",
-            )
+            // Bilibili's third-party CDN nodes (upos-sz-estg*) reject mobile /
+            // custom User-Agents with HTTP 403 and only serve desktop browser
+            // agents, so send a desktop Chrome UA for audio requests
+            // (same constant the API client signs with).
+            put("User-Agent", BiliDirectClient.UA)
             if (cookie.isNotBlank()) put("Cookie", cookie)
         }
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("MyMusic/1.0 (Android)")
+            .setUserAgent(BiliDirectClient.UA)
             .setDefaultRequestProperties(defaultHeaders)
             .setAllowCrossProtocolRedirects(true)
 
+        // Snappy seeking: resume playback after only 0.5 s / 1 s of buffered
+        // audio (defaults are 2.5 s / 5 s — a seek audibly "pauses" while
+        // that much media is fetched), and keep 30 s of back buffer so short
+        // backward seeks are served instantly without hitting the network.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15_000,
+                /* maxBufferMs = */ 50_000,
+                /* bufferForPlaybackMs = */ 500,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_000,
+            )
+            .setBackBuffer(
+                /* backBufferDurationMs = */ 30_000,
+                /* retainBackBufferFromKeyframe = */ true,
+            )
+            .build()
+
         val player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpDataSourceFactory))
+            .setLoadControl(loadControl)
             .setAudioAttributes(AudioAttributes.DEFAULT, /* handleAudioFocus= */ true)
             .setHandleAudioBecomingNoisy(true)
             .build()

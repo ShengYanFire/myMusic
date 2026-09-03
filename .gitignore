@@ -1,10 +1,26 @@
 # Android
 android/.gradle/
+android/.kotlin/
 android/local.properties
 android/app/build/
 android/build/
+android/assemble.log
 *.iml
 .idea/
+
+# Debug artifacts at repo root (adb uiautomator dumps / logs / screenshots /
+# pulled datastore snapshots) - they never belong in the repo
+/*.xml
+/*.png
+/full-log.txt
+/gfxinfo.txt
+/library.pb.txt
+
+# Local scratch / reference-extract directories
+/.gradle-tmp/
+/nav-src/
+/navc-src/
+/navcmn-src/
 
 # Machine-specific toolchain setup script (references local DevEco JDK path)
 setup-toolchain.cmd

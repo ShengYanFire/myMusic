@@ -21,4 +21,21 @@ data class VideoInfo(
 data class AudioInfo(
     val url: String,
     val duration: Long? = null,
+    /** All usable audio URLs for this stream, ordered best-first. Includes
+     *  backupUrl mirrors (often different CDN nodes) and lower tiers when the
+     *  chosen quality has none, so the player can fall back on 403/404. */
+    val urls: List<String> = listOf(url),
+)
+
+/**
+ * A subtitle track listed by /x/player/wbi/v2 (CC subtitles and B站 AI 字幕).
+ * [url] points to a JSON file on the hdslb CDN whose "body" array carries
+ * {from, to, content} entries — the closest thing Bilibili has to lyrics.
+ */
+data class BiliSubtitle(
+    val lan: String,
+    val lanDoc: String,
+    val url: String,
+    /** 0 = human subtitles, non-zero = AI-generated. */
+    val aiType: Int,
 )
