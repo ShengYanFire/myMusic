@@ -1,48 +1,30 @@
 package com.mymusic.player.ui.theme
 
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 
 /**
- * Signature gradient brushes shared across the whole app.
+ * Static surface colors shared across the app.
  *
- * The two gradient families give every screen one consistent "aurora"
- * identity — fresh enough to feel airy (清新淡雅), yet luminous enough to
- * feel cool (炫酷):
- *  - [Primary]  mint → sky → iris (hero buttons, play control, accents)
- *  - [Accent]   sky → iris (secondary progress, tags, rings)
+ * All *gradients* are now living auroras driven by [AuroraFlow] — see
+ * `Modifier.auroraFill`, `Modifier.auroraGlow`, [AuroraSky] and
+ * [auroraAccent]. This file only keeps the fixed glass / scrim tones that
+ * should NOT shift with the aurora (they carry text and keep the UI calm).
  */
 object AppGradients {
 
-    val Primary = listOf(Mint, Sky, Iris)
-    val Accent = listOf(Sky, Iris)
-
-    fun primaryBrush(): Brush = Brush.linearGradient(Primary)
-
-    fun accentBrush(): Brush = Brush.linearGradient(Accent)
-
-    /** Hero banner behind the search header — a deep aurora night. */
-    fun bannerBrush(): Brush = Brush.linearGradient(
-        colors = listOf(Color(0xFF0F766E), Color(0xFF0369A1), Color(0xFF4F46E5)),
-    )
-
-    /** Top color of the page background, used by sticky headers to blend in. */
+    /**
+     * Top color of the page background, used by sticky headers to blend into
+     * the (static) top of [AuroraSky]'s base gradient — the aurora curtains
+     * are biased below the header band so the blend stays seamless.
+     */
     fun backgroundTop(dark: Boolean): Color =
-        if (dark) Color(0xFF07161C) else Color(0xFFF4FBF9)
+        if (dark) Color(0xFF081020) else Color(0xFFF5FBF9)
 
-    /** Full-screen ambient background (subtle). */
-    fun backgroundBrush(dark: Boolean): Brush =
-        if (dark) {
-            Brush.verticalGradient(listOf(Color(0xFF07161C), DarkBgDeep))
-        } else {
-            Brush.verticalGradient(listOf(Color(0xFFF4FBF9), Color(0xFFE7F3EF)))
-        }
-
-    /** Deep translucent teal-glass surface used by floating bars / mini player. */
-    val BarGlass = Color(0xF20B1E24)
+    /** Deep translucent night-glass surface used by floating bars / mini player. */
+    val BarGlass = Color(0xF20B1622)
 
     /** Bottom fade of the bottom navigation bar. */
-    val BarBottom = Color(0xFF050E12)
+    val BarBottom = Color(0xFF070D18)
 
     /** Dark translucent scrim used over blurred album art. */
     val ScrimDark = Color(0xCC05131A)

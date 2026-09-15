@@ -1,14 +1,17 @@
 package com.mymusic.player.network
 
+import android.text.Html
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
 import com.mymusic.player.data.AppSettings
 import java.security.MessageDigest
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,15 +27,18 @@ import okhttp3.Request
  *   sub_key = 4932caff0ff746eab6f01bf08b70ac45
  *   mixin_key = ea1db124af3c7062474693fa704f4ff8
  */
-class BiliDirectClient(private val settings: AppSettings) {
+class BiliDirectClient(
+    private val settings: AppSettings,
+    private val client: OkHttpClient,
+) {
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
-
+    @Volatile
     private var wbi: WbiKeys? = null
+    @Volatile
     private var wbiFetchedAt = 0L
+
+    /** Serializes the WBI key fetch: concurrent signed requests share one /nav call. */
+    private val wbiMutex = Mutex()
 
     private data class WbiKeys(val imgKey: String, val subKey: String)
 
@@ -53,14 +59,7 @@ class BiliDirectClient(private val settings: AppSettings) {
         return result.mapNotNull { el ->
             val o = el.asJsonObject
             if (o.get("type")?.asString != "video") return@mapNotNull null
-            SearchItem(
-                bvid = o.str("bvid"),
-                title = stripHtml(o.str("title")),
-                pic = normalizePic(o.str("pic")),
-                duration = o.get("duration").intOr(),
-                author = o.str("author"),
-                play = o.get("play").longOrNull(),
-            )
+            toSearchItem(o)
         }
     }
 
@@ -94,11 +93,72 @@ class BiliDirectClient(private val settings: AppSettings) {
         return arr.mapNotNull { toSearchItem(it.asJsonObject) }.take(limit)
     }
 
-    /** Video detail (needed to get the cid for page 1). */
+    /**
+     * Video detail (needed to get the cid for page 1). The response also
+     * carries the video's 分P list (视频选集) and — when the video is part of
+     * an uploader 合集 (ugc_season) — every episode of that collection, both
+     * returned alongside the cid ([VideoInfo.pages] / [VideoInfo.seasonEpisodes]).
+     */
     suspend fun videoInfo(bvid: String): VideoInfo {
         val d = get("/x/web-interface/view", mapOf("bvid" to bvid), signed = false)
             .obj("data")
-        return VideoInfo(bvid = d.str("bvid"), cid = d.get("cid").longOrNull())
+        return VideoInfo(
+            cid = d.get("cid").longOrNull(),
+            pages = videoPages(d),
+            seasonEpisodes = seasonEpisodes(d),
+        )
+    }
+
+    /** 分P list (视频选集) of a /view response; empty when the field is absent. */
+    private fun videoPages(d: JsonObject): List<BiliPage> {
+        val arr = d.get("pages")?.takeIf { it.isJsonArray }?.asJsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val cid = o.get("cid")?.longOrNull() ?: return@mapNotNull null
+            BiliPage(
+                cid = cid,
+                page = o.get("page")?.longOrNull()?.toInt() ?: 1,
+                part = o.str("part"),
+                duration = o.get("duration")?.longOrNull()?.toInt() ?: 0,
+            )
+        }
+    }
+
+    /**
+     * Videos of the 合集 a /view response carries, in order:
+     * ugc_season.sections[].episodes[] (or a flat ugc_season.episodes[] on
+     * the older shape), each mapped to a [SearchItem] from its arc (cover /
+     * duration / uploader / play count). Empty when the video does not belong
+     * to a collection. Parsed defensively — any unexpected shape simply
+     * means "no collection".
+     */
+    private fun seasonEpisodes(d: JsonObject): List<SearchItem> {
+        val season = d.objOrNull("ugc_season") ?: return emptyList()
+        val sections = season.get("sections")?.takeIf { it.isJsonArray }?.asJsonArray
+        // Newer responses group episodes under sections[]; older ones put
+        // episodes directly on ugc_season — read whichever is present.
+        val containers: List<JsonObject> = sections
+            ?.mapNotNull { it as? JsonObject }
+            ?: listOf(season)
+        return containers.flatMap { sec ->
+            val episodes = sec.get("episodes")?.takeIf { it.isJsonArray }?.asJsonArray
+                ?: return@flatMap emptyList()
+            episodes.mapNotNull { epEl ->
+                val ep = epEl as? JsonObject ?: return@mapNotNull null
+                val epBvid = ep.str("bvid")
+                if (epBvid.isBlank()) return@mapNotNull null
+                val arc = ep.objOrNull("arc")
+                SearchItem(
+                    bvid = epBvid,
+                    title = stripHtml(ep.str("title").ifBlank { arc?.str("title").orEmpty() }),
+                    pic = normalizePic(arc?.str("pic").orEmpty()),
+                    duration = (arc?.get("duration")?.longOrNull() ?: ep.get("duration").longOrNull())
+                        ?.toInt() ?: 0,
+                    author = arc?.objOrNull("owner")?.str("name").orEmpty(),
+                    play = arc?.objOrNull("stat")?.get("view")?.longOrNull(),
+                )
+            }
+        }
     }
 
     /** Best audio-only DASH stream; quality "low" = least data. Returns the
@@ -112,7 +172,10 @@ class BiliDirectClient(private val settings: AppSettings) {
         )
         val dash = body.obj("data").getAsJsonObject("dash")
             ?: throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
-        val list = dash.getAsJsonArray("audio")?.map { it.asJsonObject }.orEmpty()
+        // Defensive casts throughout: a malformed element means "skip the
+        // tier", never a parse crash (consistent with the rest of this file).
+        val list = dash.get("audio")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?.mapNotNull { it as? JsonObject }.orEmpty()
         if (list.isEmpty()) {
             throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
         }
@@ -124,14 +187,17 @@ class BiliDirectClient(private val settings: AppSettings) {
         val urls = LinkedHashSet<String>()
         for (t in ordered) {
             t.str("baseUrl").takeIf { it.isNotBlank() }?.let { urls.add(it) }
-            t.getAsJsonArray("backupUrl")?.forEach { el ->
-                el.asString.takeIf { it.isNotBlank() }?.let { urls.add(it) }
+            t.get("backupUrl")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { el ->
+                (el as? JsonPrimitive)?.takeIf { it.isString }?.asString
+                    ?.takeIf { it.isNotBlank() }?.let { urls.add(it) }
             }
         }
         if (urls.isEmpty()) {
             throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
         }
-        val first = list.first()
+        // Duration of the tier we actually picked (raw list order may differ
+        // from the quality-ordered one).
+        val first = ordered.first()
         return AudioInfo(
             url = urls.first(),
             urls = urls.toList(),
@@ -141,10 +207,15 @@ class BiliDirectClient(private val settings: AppSettings) {
     }
 
     /** Connectivity check: fetch WBI keys from /nav (works even when logged out). */
-    suspend fun ping(): Boolean =
-        runCatching {
-            get("/x/web-interface/nav", emptyMap(), signed = false, allowLoggedOut = true)
-        }.isSuccess
+    suspend fun ping(): Boolean = try {
+        get("/x/web-interface/nav", emptyMap(), signed = false, allowLoggedOut = true)
+        true
+    } catch (e: CancellationException) {
+        // A cancelled ping must report neither "ok" nor "broken" — propagate.
+        throw e
+    } catch (e: Exception) {
+        false
+    }
 
     /**
      * Subtitle tracks of a video (CC + AI 字幕) from /x/player/wbi/v2 —
@@ -207,14 +278,14 @@ class BiliDirectClient(private val settings: AppSettings) {
 
             val requestBuilder = Request.Builder()
                 .url(url)
-                .header("User-Agent", UA)
-                .header("Referer", "https://www.bilibili.com/")
+                .header("User-Agent", BiliHeaders.DESKTOP_UA)
+                .header("Referer", BiliHeaders.REFERER)
             val cookie = settings.cookie.first()
             if (cookie.isNotBlank()) {
                 requestBuilder.header("Cookie", cookie)
             }
 
-            client.newCall(requestBuilder.build()).execute().use { resp ->
+            client.awaitCall(requestBuilder.build()).use { resp ->
                 if (!resp.isSuccessful) throw RuntimeException("B 站返回 HTTP ${resp.code}")
                 val text = resp.body?.string() ?: throw RuntimeException("B 站返回空响应")
                 val obj = JsonParser.parseString(text).asJsonObject
@@ -229,9 +300,16 @@ class BiliDirectClient(private val settings: AppSettings) {
             }
         }
 
-    private suspend fun wbiKeys(): WbiKeys {
+    /**
+     * WBI keys with a single-flight fetch: the mutex guarantees that the
+     * parallel searches of a recommendation reload all SHARE one /nav call
+     * instead of each firing a duplicate (10+ requests on a cold cache, which
+     * reads as a request burst to Bilibili's risk control).
+     */
+    private suspend fun wbiKeys(): WbiKeys = wbiMutex.withLock {
         val now = System.currentTimeMillis()
-        if (wbi != null && now - wbiFetchedAt < WBI_TTL) return wbi!!
+        val cached = wbi?.takeIf { now - wbiFetchedAt < WBI_TTL }
+        if (cached != null) return@withLock cached
         val img = get(
             "/x/web-interface/nav", emptyMap(), signed = false, allowLoggedOut = true,
         )
@@ -239,46 +317,15 @@ class BiliDirectClient(private val settings: AppSettings) {
             .obj("wbi_img")
         val imgUrl = img.str("img_url")
         val subUrl = img.str("sub_url")
+        if (imgUrl.isBlank() || subUrl.isBlank()) {
+            throw RuntimeException("B 站响应缺少 WBI 密钥")
+        }
         val imgKey = imgUrl.substring(imgUrl.lastIndexOf('/') + 1, imgUrl.lastIndexOf('.'))
         val subKey = subUrl.substring(subUrl.lastIndexOf('/') + 1, subUrl.lastIndexOf('.'))
-        wbi = WbiKeys(imgKey, subKey)
+        val keys = WbiKeys(imgKey, subKey)
+        wbi = keys
         wbiFetchedAt = now
-        return wbi!!
-    }
-
-    /**
-     * WBI request signing:
-     * add wts, drop !'()* chars, sort keys, JS-style percent-encode, md5(query+mixinKey).
-     */
-    private fun encWbi(params: Map<String, Any>, imgKey: String, subKey: String): String {
-        val mixinKey = getMixinKey(imgKey + subKey)
-        val query = HashMap<String, String>()
-        params.forEach { (k, v) -> query[k] = filterReservedChars(v.toString()) }
-        query["wts"] = (System.currentTimeMillis() / 1000).toString()
-        val enc = query.keys.sorted().joinToString("&") { k ->
-            "${encodeURIComponent(k)}=${encodeURIComponent(query[k]!!)}"
-        }
-        return "$enc&w_rid=${md5(enc + mixinKey)}"
-    }
-
-    private fun getMixinKey(orig: String): String {
-        val sb = StringBuilder()
-        for (i in MIXIN_TAB) sb.append(orig[i])
-        return sb.toString().substring(0, 32)
-    }
-
-    private fun filterReservedChars(value: String): String =
-        value.replace("[!'()*]".toRegex(), "")
-
-    /** JS-compatible encodeURIComponent (space -> %20, ~ unencoded, hex uppercase). */
-    private fun encodeURIComponent(value: String): String {
-        val enc = java.net.URLEncoder.encode(value, "UTF-8")
-        return enc.replace("+", "%20").replace("%7E", "~")
-    }
-
-    private fun md5(input: String): String {
-        val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        keys
     }
 
     // ------------------------------------------------------------------
@@ -311,7 +358,10 @@ class BiliDirectClient(private val settings: AppSettings) {
         )
     }
 
-    private fun JsonObject.str(name: String): String = get(name)?.asString ?: ""
+    /** String field reading that tolerates absent values AND JSON nulls
+     *  (JsonNull is not a JsonPrimitive, so a null field reads back as ""). */
+    private fun JsonObject.str(name: String): String =
+        (get(name) as? JsonPrimitive)?.asString ?: ""
 
     /**
      * Robust number reading. Bilibili sometimes returns numbers as decimal strings
@@ -333,20 +383,73 @@ class BiliDirectClient(private val settings: AppSettings) {
 
     private fun JsonElement?.intOr(default: Int = 0): Int = longOrNull()?.toInt() ?: default
 
+    /**
+     * Strip HTML tags AND decode entities: Bilibili wraps the search keyword
+     * in `<em class="keyword">…</em>` and may escape the rest, so a naive tag
+     * regex would leave `&amp;` / `&#39;` literals in the title.
+     */
     private fun stripHtml(text: String): String =
-        text.replace(Regex("<[^>]+>"), "").trim()
+        Html.fromHtml(text, Html.FROM_HTML_MODE_COMPACT).toString().trim()
 
-    private fun normalizePic(pic: String): String =
-        if (pic.startsWith("//")) "https:$pic" else pic
+    /** Scheme-agnostic CDN links are upgraded to https (the CDN serves it);
+     *  already-https and non-http (data:/relative) links pass through. */
+    private fun normalizePic(pic: String): String = when {
+        pic.startsWith("//") -> "https:$pic"
+        pic.startsWith("http://") -> "https://" + pic.removePrefix("http://")
+        else -> pic
+    }
 
     companion object {
         private const val WBI_TTL = 10 * 60 * 1000L
-        // Desktop Chrome UA: the playurl/WBI APIs and third-party CDN nodes
-        // behave differently (estg* nodes 403 mobile agents), so present as a
-        // desktop browser for the whole request path.
-        const val UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+        /** JS-compatible encodeURIComponent (space -> %20, ~ unencoded, hex uppercase). */
+        internal fun encodeURIComponent(value: String): String {
+            val enc = java.net.URLEncoder.encode(value, "UTF-8")
+            return enc.replace("+", "%20").replace("%7E", "~")
+        }
+
+        /**
+         * WBI request signing:
+         * add wts, drop !'()* chars, sort keys, JS-style percent-encode, md5(query+mixinKey).
+         *
+         * [wts] is injectable so tests can pin the timestamp against a known
+         * vector (default: now).
+         */
+        internal fun encWbi(
+            params: Map<String, Any>,
+            imgKey: String,
+            subKey: String,
+            wts: Long = System.currentTimeMillis() / 1000,
+        ): String {
+            val mixinKey = getMixinKey(imgKey + subKey)
+            val query = HashMap<String, String>()
+            params.forEach { (k, v) -> query[k] = filterReservedChars(v.toString()) }
+            query["wts"] = wts.toString()
+            val enc = query.keys.sorted().joinToString("&") { k ->
+                "${encodeURIComponent(k)}=${encodeURIComponent(query[k]!!)}"
+            }
+            return "$enc&w_rid=${md5(enc + mixinKey)}"
+        }
+
+        /**
+         * Extracts the 32-char WBI mixin key by shuffling the concatenated
+         * img+sub keys through the fixed [MIXIN_TAB] index table. Reference
+         * vector: 7cd084941338484aae1ad9425b84077c + 4932caff0ff746eab6f01bf08b70ac45
+         * → ea1db124af3c7062474693fa704f4ff8.
+         */
+        internal fun getMixinKey(orig: String): String {
+            val sb = StringBuilder()
+            for (i in MIXIN_TAB) sb.append(orig[i])
+            return sb.toString().substring(0, 32)
+        }
+
+        internal fun filterReservedChars(value: String): String =
+            value.replace("[!'()*]".toRegex(), "")
+
+        internal fun md5(input: String): String {
+            val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
+            return bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }
 
         private val MIXIN_TAB = intArrayOf(
             46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,

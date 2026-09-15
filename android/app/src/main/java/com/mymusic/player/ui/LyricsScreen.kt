@@ -3,7 +3,6 @@ package com.mymusic.player.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -42,34 +41,30 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import com.mymusic.player.domain.LyricLine
 import com.mymusic.player.player.PlayerController
-import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.Mint
-
-private val White70 = Color(0xB3FFFFFF)
-private val White40 = Color(0x66FFFFFF)
+import com.mymusic.player.player.PlayerUiState
+import com.mymusic.player.ui.theme.White40
+import com.mymusic.player.ui.theme.White70
+import com.mymusic.player.ui.theme.auroraAccent
+import com.mymusic.player.ui.theme.auroraFill
 
 /**
  * Immersive full-screen lyrics page, opened by tapping the album cover on
@@ -91,33 +86,15 @@ fun LyricsScreen(
     val current = playerState.current
     val lyricsState by vm.lyrics.collectAsState()
 
-    // (Re)load lyrics whenever the played track changes.
-    LaunchedEffect(current?.bvid) {
+    // (Re)load lyrics whenever the played track changes (uid: multi-P pages
+    // of one video each have their own subtitles).
+    LaunchedEffect(current?.uid) {
         current?.let { vm.loadLyrics(it) }
     }
 
     Box(Modifier.fillMaxSize()) {
         // ---- Immersive blurred cover backdrop (same language as NowPlaying) ----
-        if (current?.cover != null) {
-            AsyncImage(
-                model = current.cover,
-                contentDescription = null,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .blur(60.dp)
-                    .alpha(0.4f),
-                contentScale = ContentScale.Crop,
-            )
-        }
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color(0x33000000), AppGradients.ScrimDark),
-                    ),
-                ),
-        )
+        BlurredCoverBackdrop(current?.cover)
 
         if (current == null) {
             EmptyHint("暂无播放，去搜索吧", Modifier.fillMaxSize())
@@ -132,10 +109,11 @@ fun LyricsScreen(
         ) {
             // ---- Header: back / song info / refresh ----
             Row(verticalAlignment = Alignment.CenterVertically) {
-                LyricsGlassButton(
+                GlassIconButton(
                     onClick = onClose,
                     icon = Icons.Filled.KeyboardArrowDown,
                     contentDescription = "返回",
+                    size = 44.dp,
                 )
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
@@ -155,10 +133,14 @@ fun LyricsScreen(
                     )
                 }
                 Spacer(Modifier.width(14.dp))
-                LyricsGlassButton(
+                // A refresh in flight (old lines still shown) lights the
+                // button up with the aurora accent instead of blanking the list.
+                GlassIconButton(
                     onClick = { vm.loadLyrics(current, force = true) },
                     icon = Icons.Filled.Refresh,
                     contentDescription = "重新获取歌词",
+                    size = 44.dp,
+                    accent = lyricsState.loading,
                 )
             }
 
@@ -188,7 +170,7 @@ fun LyricsScreen(
                 when {
                     lyricsState.loading && lyricsState.lines.isEmpty() -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = Mint)
+                            AuroraSpinner()
                         }
                     }
 
@@ -227,7 +209,6 @@ fun LyricsScreen(
                     else -> LyricsList(
                         lines = lyricsState.lines,
                         synced = lyricsState.synced,
-                        positionMs = playerState.positionMs,
                         centerPadding = centerPadding,
                         scrollTargetPx = scrollTargetPx,
                     )
@@ -244,22 +225,30 @@ fun LyricsScreen(
  * Scrollable lyrics with the active line highlighted (white, slightly
  * larger), neighbours dimmed, everything else faint. Tapping a synced line
  * seeks the player to it.
+ *
+ * Self-collects the 2 Hz position flow: the tick recomposes nothing above
+ * this component, and [activeIndex] is DERIVED — between line changes the
+ * tick re-evaluates one comparison instead of recomposing every row.
  */
 @Composable
 private fun LyricsList(
-    lines: List<com.mymusic.player.domain.LyricLine>,
+    lines: List<LyricLine>,
     synced: Boolean,
-    positionMs: Long,
     centerPadding: Dp,
     scrollTargetPx: Int,
 ) {
     val listState = rememberLazyListState()
     var userTouching by remember { mutableStateOf(false) }
+    val positionMs by PlayerController.positionMs.collectAsState()
 
-    // The active line: the last line whose start has been reached. A plain
-    // computation per recomposition (every 500 ms tick) — a linear scan over
-    // a few hundred lines is negligible and avoids derived-state subtleties.
-    val activeIndex = if (!synced) -1 else lines.indexOfLast { it.startMs <= positionMs }
+    // The active line: the last line whose start has been reached. Derived so
+    // the 500 ms position ticks only invalidate the list when the ACTIVE LINE
+    // actually changes (not per tick, and not for the untimed plain lyrics).
+    val activeIndex by remember(synced, lines) {
+        derivedStateOf {
+            if (!synced) -1 else lines.indexOfLast { it.startMs <= positionMs }
+        }
+    }
 
     // Keep the active line about a third from the top. Paused while the user
     // is touching the list so a manual scroll is never fought; resumes on the
@@ -284,7 +273,10 @@ private fun LyricsList(
         contentPadding = PaddingValues(vertical = centerPadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        itemsIndexed(lines) { index, line ->
+        // Keyed by start time: a lyrics refresh swaps the list wholesale, and
+        // stable keys let rows (and their color/scale animations) survive
+        // instead of all being treated as brand-new items.
+        itemsIndexed(lines, key = { _, line -> line.startMs }) { index, line ->
             val active = index == activeIndex
             val near = !active && (index == activeIndex - 1 || index == activeIndex + 1)
             val color by animateColorAsState(
@@ -319,31 +311,17 @@ private fun LyricsList(
     }
 }
 
+/** Loading spinner tinted with the living aurora accent (scoped leaf). */
+@Composable
+private fun AuroraSpinner() {
+    CircularProgressIndicator(color = auroraAccent())
+}
+
 /** Seek bar + compact transport controls pinned to the bottom of the lyrics page. */
 @Composable
-private fun FooterControls(playerState: com.mymusic.player.player.PlayerUiState) {
-    var sliderPos by remember { mutableStateOf<Float?>(null) }
-    val maxMs = playerState.durationMs.coerceAtLeast(1L)
-    val displayPosMs = sliderPos?.let { (it * maxMs).toLong() }
-        ?: playerState.positionMs.coerceIn(0, playerState.durationMs)
-
+private fun FooterControls(playerState: PlayerUiState) {
     Column(Modifier.fillMaxWidth()) {
-        GradientSeekBar(
-            progress = (displayPosMs / maxMs.toFloat()).coerceIn(0f, 1f),
-            onValueChange = { sliderPos = it },
-            onSeekFinished = {
-                sliderPos?.let { PlayerController.seekTo((it * maxMs).toLong()) }
-                sliderPos = null
-            },
-            onSeekCancelled = { sliderPos = null },
-            active = playerState.isPlaying,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-            Text(formatMs(displayPosMs), style = MaterialTheme.typography.labelSmall, color = White70)
-            Spacer(Modifier.weight(1f))
-            Text(formatMs(playerState.durationMs), style = MaterialTheme.typography.labelSmall, color = White70)
-        }
+        PlayerSeekBar(isPlaying = playerState.isPlaying, durationMs = playerState.durationMs)
 
         Spacer(Modifier.height(10.dp))
 
@@ -352,18 +330,19 @@ private fun FooterControls(playerState: com.mymusic.player.player.PlayerUiState)
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            LyricsGlassButton(
+            GlassIconButton(
                 onClick = { PlayerController.playPrevious() },
                 icon = Icons.Filled.SkipPrevious,
                 contentDescription = "上一首",
+                size = 44.dp,
             )
             Spacer(Modifier.width(30.dp))
             Box(
                 Modifier
                     .size(72.dp)
-                    .shadow(12.dp, CircleShape, ambientColor = Mint.copy(alpha = 0.55f))
+                    .shadow(12.dp, CircleShape, ambientColor = Color(0x4D000000))
                     .clip(CircleShape)
-                    .background(AppGradients.primaryBrush())
+                    .auroraFill(CircleShape)
                     .clickable { PlayerController.togglePlayPause() },
                 contentAlignment = Alignment.Center,
             ) {
@@ -375,38 +354,14 @@ private fun FooterControls(playerState: com.mymusic.player.player.PlayerUiState)
                 )
             }
             Spacer(Modifier.width(30.dp))
-            LyricsGlassButton(
+            GlassIconButton(
                 onClick = { PlayerController.playNext() },
                 icon = Icons.Filled.SkipNext,
                 contentDescription = "下一首",
+                size = 44.dp,
             )
         }
 
         Spacer(Modifier.height(6.dp))
-    }
-}
-
-/** Circular glassy icon button (same visual language as the Now Playing screen). */
-@Composable
-private fun LyricsGlassButton(
-    onClick: () -> Unit,
-    icon: ImageVector,
-    contentDescription: String,
-    size: Dp = 44.dp,
-) {
-    Box(
-        Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(Color(0x1FFFFFFF))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            icon,
-            contentDescription = contentDescription,
-            tint = White70,
-            modifier = Modifier.size(size * 0.55f),
-        )
     }
 }

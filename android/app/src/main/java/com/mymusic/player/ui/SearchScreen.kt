@@ -1,6 +1,7 @@
 package com.mymusic.player.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -40,14 +41,18 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,12 +60,16 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.mymusic.player.domain.MusicGenres
 import com.mymusic.player.domain.MusicMoods
-import com.mymusic.player.domain.Track
 import com.mymusic.player.network.SearchItem
+import com.mymusic.player.network.toTrack
 import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.Mint
-import com.mymusic.player.ui.theme.Sky
-import kotlinx.coroutines.launch
+import com.mymusic.player.ui.theme.AuroraSpectrumDeep
+import com.mymusic.player.ui.theme.AuroraText
+import com.mymusic.player.ui.theme.LocalAuroraPhase
+import com.mymusic.player.ui.theme.TAU
+import com.mymusic.player.ui.theme.auroraFill
+import com.mymusic.player.ui.theme.auroraGlow
+import kotlin.math.sin
 
 /**
  * Search page: a single scroll container so the hero banner scrolls away while
@@ -89,7 +98,7 @@ fun SearchScreen(
     val favoriteGenres by vm.favoriteGenres.collectAsState()
     val favoriteMoods by vm.favoriteMoods.collectAsState()
     val recommendGeneration by vm.recommendGeneration.collectAsState()
-    val scope = rememberCoroutineScope()
+    val resolvingUid by vm.resolvingUid.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
 
@@ -102,11 +111,17 @@ fun SearchScreen(
         }
     }
 
-    // Pull-to-refresh indicator shows only when there is already content.
-    val isRefreshing = if (query.isBlank()) {
-        loadingRecommendations && recommendations.isNotEmpty()
-    } else {
-        searching && results.isNotEmpty()
+    // Pull-to-refresh indicator shows only when there is already content —
+    // derived so the (cheap) comparison re-runs only when one of its inputs
+    // actually flips, not on every keystroke recomposition.
+    val isRefreshing by remember(query) {
+        derivedStateOf {
+            if (query.isBlank()) {
+                loadingRecommendations && recommendations.isNotEmpty()
+            } else {
+                searching && results.isNotEmpty()
+            }
+        }
     }
 
     PullToRefreshBox(
@@ -173,18 +188,19 @@ fun SearchScreen(
                         ListHeaderRow(
                             title = "搜索结果",
                             onPlayAll = {
-                                scope.launch {
-                                    if (vm.playFromList(results.map { it.toTrack() })) onOpenPlayer()
-                                }
+                                vm.requestPlay(results.map { it.toTrack() }) { onOpenPlayer() }
                             },
                         )
                     }
                     itemsIndexed(results, key = { _, it -> it.bvid }) { index, item ->
                         SearchRow(
                             item = item,
+                            resolving = resolvingUid == item.bvid,
                             onClick = {
-                                scope.launch {
-                                    if (vm.playFromList(results.map { it.toTrack() }, index)) {
+                                if (resolvingUid == item.bvid) {
+                                    vm.cancelPlay()
+                                } else {
+                                    vm.requestPlay(results.map { it.toTrack() }, index) {
                                         onOpenPlayer()
                                     }
                                 }
@@ -246,10 +262,8 @@ fun SearchScreen(
                                     favoriteMoodIds = favoriteMoods,
                                     onOpenSettings = onOpenSettings,
                                     onPlayAll = {
-                                        scope.launch {
-                                            if (vm.playFromList(recommendations.map { it.toTrack() })) {
-                                                onOpenPlayer()
-                                            }
+                                        vm.requestPlay(recommendations.map { it.toTrack() }) {
+                                            onOpenPlayer()
                                         }
                                     },
                                 )
@@ -257,12 +271,14 @@ fun SearchScreen(
                             itemsIndexed(recommendations, key = { _, it -> it.bvid }) { index, item ->
                                 SearchRow(
                                     item = item,
+                                    resolving = resolvingUid == item.bvid,
                                     onClick = {
-                                        scope.launch {
-                                            if (vm.playFromList(
-                                                    recommendations.map { it.toTrack() },
-                                                    index,
-                                                )
+                                        if (resolvingUid == item.bvid) {
+                                            vm.cancelPlay()
+                                        } else {
+                                            vm.requestPlay(
+                                                recommendations.map { it.toTrack() },
+                                                index,
                                             ) {
                                                 onOpenPlayer()
                                             }
@@ -306,7 +322,7 @@ private fun HeroBanner() {
     Box(
         Modifier
             .fillMaxWidth()
-            .background(AppGradients.bannerBrush()),
+            .auroraFill(spectrum = AuroraSpectrumDeep),
     ) {
         // Decorative glow circles — an aurora haze.
         Box(
@@ -323,13 +339,13 @@ private fun HeroBanner() {
                 .offset(x = 96.dp, y = 60.dp)
                 .background(Color.Black.copy(alpha = 0.16f), CircleShape),
         )
-        // Small mint halo echoing the brand accent.
+        // A living aurora halo echoing the drifting accent.
         Box(
             Modifier
                 .size(90.dp)
                 .align(Alignment.TopEnd)
                 .offset(x = (-70).dp, y = 34.dp)
-                .background(Mint.copy(alpha = 0.22f), CircleShape),
+                .auroraGlow(alpha = 0.30f),
         )
         Column(Modifier.padding(start = 22.dp, end = 22.dp, top = 28.dp, bottom = 30.dp)) {
             Text(
@@ -350,18 +366,30 @@ private fun HeroBanner() {
                 color = Color.White.copy(alpha = 0.85f),
             )
             Spacer(Modifier.height(14.dp))
-            // Equalizer bars — a quiet nod to the music inside.
-            Row(verticalAlignment = Alignment.Bottom) {
-                listOf(10, 20, 14, 26, 16).forEach { h ->
-                    Box(
-                        Modifier
-                            .padding(end = 5.dp)
-                            .size(width = 6.dp, height = h.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(Color.White.copy(alpha = 0.65f)),
-                    )
-                }
-            }
+            EqualizerBars()
+        }
+    }
+}
+
+/** Five rounded bars bobbing quietly on the shared aurora clock. */
+@Composable
+private fun EqualizerBars() {
+    val aurora = LocalAuroraPhase.current
+    Canvas(Modifier.size(width = 60.dp, height = 26.dp)) {
+        val t = aurora.value
+        val barWidth = 6.dp.toPx()
+        val gap = 5.dp.toPx()
+        val corner = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+        listOf(10, 20, 14, 26, 16).forEachIndexed { i, base ->
+            // Integer clock multiplier → the dance loops seamlessly.
+            val wave = 0.55f + 0.45f * (0.5f + 0.5f * sin(t * TAU * 2f + i * 1.9f))
+            val h = base.dp.toPx() * wave
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.65f),
+                topLeft = Offset(i * (barWidth + gap), size.height - h),
+                size = Size(barWidth, h),
+                cornerRadius = corner,
+            )
         }
     }
 }
@@ -489,17 +517,23 @@ private fun RecommendHeader(
                 style = MaterialTheme.typography.titleMedium,
             )
             Spacer(Modifier.height(2.dp))
-            Text(
-                summary ?: "点此设置喜欢的音乐类型，推荐更懂你",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (hasPreference) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (summary != null) {
+                // Preference summary breathes with the aurora.
+                AuroraText(
+                    summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Text(
+                    "点此设置喜欢的音乐类型，推荐更懂你",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         GradientButton(
             text = "全部播放",
@@ -535,7 +569,11 @@ private fun LoadMoreRow(
 }
 
 @Composable
-private fun SearchRow(item: SearchItem, onClick: () -> Unit) {
+private fun SearchRow(
+    item: SearchItem,
+    onClick: () -> Unit,
+    resolving: Boolean = false,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -553,7 +591,7 @@ private fun SearchRow(item: SearchItem, onClick: () -> Unit) {
                 .size(56.dp)
                 .shadow(6.dp, RoundedCornerShape(14.dp))
                 .clip(RoundedCornerShape(14.dp)),
-            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            contentScale = ContentScale.Crop,
         )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -579,29 +617,29 @@ private fun SearchRow(item: SearchItem, onClick: () -> Unit) {
                 .shadow(
                     elevation = 8.dp,
                     shape = CircleShape,
-                    ambientColor = Mint.copy(alpha = 0.5f),
-                    spotColor = Sky.copy(alpha = 0.5f),
+                    ambientColor = Color(0x40000000),
+                    spotColor = Color(0x40000000),
                 )
                 .clip(CircleShape)
-                .background(
-                    Brush.linearGradient(listOf(Mint, Sky)),
-                ),
+                .auroraFill(CircleShape, phaseOffset = 0.05f),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                Icons.Filled.PlayArrow,
-                contentDescription = "播放",
-                tint = Color.White,
-                modifier = Modifier.size(22.dp),
-            )
+            if (resolving) {
+                // 解析音源中: persistent per-row spinner (the 4s snackbar alone
+                // used to leave the screen looking frozen); tap again to cancel.
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White,
+                )
+            } else {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = "播放",
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
     }
 }
-
-private fun SearchItem.toTrack(): Track = Track(
-    bvid = bvid,
-    title = title,
-    cover = pic,
-    author = author,
-    duration = duration,
-)

@@ -1,5 +1,6 @@
 package com.mymusic.player.ui
 
+import android.os.Build
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -19,8 +20,10 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -29,18 +32,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
@@ -55,18 +66,27 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.mymusic.player.domain.Track
+import com.mymusic.player.player.PlayerController
 import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.Iris
-import com.mymusic.player.ui.theme.Mint
-import com.mymusic.player.ui.theme.Sky
-import kotlin.math.PI
+import com.mymusic.player.ui.theme.AuroraSky
+import com.mymusic.player.ui.theme.LocalAuroraColorPhase
+import com.mymusic.player.ui.theme.TAU
+import com.mymusic.player.ui.theme.White70
+import com.mymusic.player.ui.theme.auroraAccent
+import com.mymusic.player.ui.theme.auroraBrushAt
+import com.mymusic.player.ui.theme.auroraColorAt
+import com.mymusic.player.ui.theme.auroraFill
+import com.mymusic.player.ui.theme.auroraWindow
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /** Duration of one full aurora flow cycle through a progress bar. */
@@ -75,49 +95,31 @@ private const val AuroraFlowDurationMs = 2600
 /** Duration of one drift cycle of the silk ribbons around the seek bar. */
 private const val RibbonDriftDurationMs = 3800
 
-/** The aurora palette the silk ribbons cycle through. */
-private val AuroraPalette = listOf(Mint, Sky, Iris, Sky)
-
 /**
- * Two full aurora periods (plus the wrapped first color) so the gradient can
- * slide by exactly one period per loop and repeat seamlessly.
+ * Builds the flowing-aurora brush for a bar [widthPx] wide at slide phase
+ * [phase] in 0f..1f, tinted by the global aurora spectrum position [hue].
+ * The gradient spans two color periods and slides one period per cycle, so
+ * the colors stream continuously through the fill while their hues drift
+ * around the shared spectrum — the bar never repeats the same view twice.
  */
-private val FlowColors: List<Color> = buildList {
-    repeat(2) { addAll(AppGradients.Primary) }
-    add(AppGradients.Primary.first())
-}
-
-/**
- * Builds the flowing-aurora brush for a bar [widthPx] wide at animation
- * [phase] in 0f..1f. The gradient spans two color periods and slides one
- * period per cycle, so the colors stream continuously through the fill.
- */
-private fun flowingAuroraBrush(widthPx: Float, phase: Float, heightPx: Float): Brush {
+private fun flowingAuroraBrush(widthPx: Float, phase: Float, heightPx: Float, hue: Float): Brush {
     val period = widthPx * 2f
     val start = -period + phase * period
+    // Two full windows of the current hue (plus the wrapped first color) so
+    // the fill can slide by exactly one period per loop and stay seamless at
+    // every hue.
+    val window = auroraWindow(hue, count = 3)
+    val flowColors = window + window + window.first()
     return Brush.linearGradient(
-        colors = FlowColors,
+        colors = flowColors,
         start = Offset(start, 0f),
         end = Offset(start + period * 2f, heightPx),
     )
 }
 
-/** Smoothly cycles through the aurora palette at [t] (any float; it wraps). */
-private fun auroraColorAt(t: Float): Color {
-    val n = AuroraPalette.size
-    // Wrap into [0, 1) — Kotlin's % keeps the sign of negative inputs, which
-    // would otherwise index the palette out of bounds.
-    val wrapped = ((t % 1f) + 1f) % 1f
-    val scaled = wrapped * n
-    val i = scaled.toInt().coerceIn(0, n - 1)
-    val f = scaled - i
-    return lerp(AuroraPalette[i], AuroraPalette[(i + 1) % n], f)
-}
-
 /** Organic silk wave: a main sine plus a weaker harmonic ripple, in [-1, 1]. */
 private fun waveOffset(x: Float, wavelength: Float, phase: Float): Float {
-    val twoPi = (2.0 * PI).toFloat()
-    val a = x / wavelength * twoPi + phase * twoPi
+    val a = x / wavelength * TAU + phase * TAU
     return 0.7f * sin(a) + 0.3f * sin(2f * a + 1.3f)
 }
 
@@ -138,6 +140,7 @@ private fun DrawScope.drawSilkTail(
     tailLength: Float,
     wavePhase: Float,
     wavelength: Float,
+    hue: Float,
 ) {
     val tailX = headX - tailLength
     val step = 8f
@@ -179,10 +182,13 @@ private fun DrawScope.drawSilkTail(
         spinePath.lineTo(sx, baseY + waveAt(sx))
     }
 
-    val shimmer = 0.85f + 0.15f * sin(wavePhase * 4f * PI.toFloat() + 2f)
-    val hueHead = auroraColorAt(wavePhase)
-    val hueMid = auroraColorAt(wavePhase + 0.22f)
-    val hueTail = auroraColorAt(wavePhase + 0.4f)
+    val shimmer = 0.85f + 0.15f * sin(wavePhase * 4f * TAU + 2f)
+    // The silk shimmers through the shared spectrum: the global hue drifts
+    // slowly while the ribbon's own drift phase streams it backward.
+    val silkHue = hue + wavePhase * 0.4f
+    val hueHead = auroraColorAt(silkHue)
+    val hueMid = auroraColorAt(silkHue + 0.22f)
+    val hueTail = auroraColorAt(silkHue + 0.4f)
 
     // ---- 逸散阴影: layered aura dissipating around the whole band. ----
     val auraBrush = Brush.horizontalGradient(
@@ -245,7 +251,8 @@ private fun DrawScope.drawSilkTail(
 }
 
 /**
- * Rounded pill button filled with the aurora gradient + a soft mint glow.
+ * Rounded pill button filled with the *living* aurora gradient — the fill's
+ * hues drift around the spectrum and its tilt sways like a hanging curtain.
  * Used for primary actions ("全部播放", "网页登录", ...).
  */
 @Composable
@@ -255,7 +262,7 @@ fun GradientButton(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     enabled: Boolean = true,
-    brush: Brush = AppGradients.primaryBrush(),
+    phaseOffset: Float = 0f,
 ) {
     val shape = RoundedCornerShape(20.dp)
     val contentColor = if (enabled) Color.White else Color.White.copy(alpha = 0.45f)
@@ -264,13 +271,18 @@ fun GradientButton(
             .shadow(
                 elevation = 8.dp,
                 shape = shape,
-                ambientColor = Mint.copy(alpha = 0.35f),
-                spotColor = Mint.copy(alpha = 0.35f),
+                ambientColor = Color(0x40000000),
+                spotColor = Color(0x40000000),
             )
             .clip(shape)
-            .background(
-                if (enabled) brush
-                else SolidColor(Mint.copy(alpha = 0.3f)),
+            .then(
+                if (enabled) {
+                    Modifier.auroraFill(shape, phaseOffset = phaseOffset)
+                } else {
+                    Modifier.background(
+                        SolidColor(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+                    )
+                },
             )
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 12.dp),
@@ -287,10 +299,11 @@ fun GradientButton(
 }
 
 /**
- * Thin rounded progress bar whose fill is the aurora gradient. While
- * [animated] is true (music playing) the aurora colors flow through the fill
- * and the progress crawls smoothly between the player's 500 ms position
- * ticks instead of stepping.
+ * Thin rounded progress bar whose fill is the living aurora gradient. The
+ * fill's hues drift around the shared spectrum at all times; while [animated]
+ * is true (music playing) the colors additionally flow through the fill and
+ * the progress crawls smoothly between the player's 500 ms position ticks
+ * instead of stepping.
  */
 @Composable
 fun GradientProgressBar(
@@ -301,13 +314,23 @@ fun GradientProgressBar(
 ) {
     val fraction = progress.coerceIn(0f, 1f)
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    // Color-only consumer → quantized aurora clock (~8 redraws/s, not 60+).
+    val aurora = LocalAuroraColorPhase.current
+
+    // Snap on big backward jumps (track change / notification seek) so the
+    // bar never glides the WRONG way across the whole track; otherwise tween
+    // to erase the 500 ms position ticks. Same shape as GradientSeekBar.
+    var lastTarget by remember { mutableFloatStateOf(fraction) }
+    val snapNow = fraction < lastTarget - 0.02f
+    LaunchedEffect(fraction) { lastTarget = fraction }
 
     // Buttery crawl: interpolate between the discrete position ticks.
     // Remembered so the animation isn't restarted by recompositions.
     val glideSpec = remember { tween<Float>(durationMillis = 500, easing = LinearEasing) }
+    val snapSpec = remember { snap<Float>() }
     val display by animateFloatAsState(
         targetValue = fraction,
-        animationSpec = glideSpec,
+        animationSpec = if (snapNow) snapSpec else glideSpec,
         label = "miniProgress",
     )
 
@@ -334,10 +357,12 @@ fun GradientProgressBar(
         )
         val fillWidth = size.width * display
         if (fillWidth > 0f) {
+            val hue = aurora.value
             val brush = if (animated) {
-                flowingAuroraBrush(size.width, phase, size.height)
+                flowingAuroraBrush(size.width, phase, size.height, hue)
             } else {
-                AppGradients.primaryBrush()
+                // Paused: the hues still drift slowly with the global clock.
+                auroraBrushAt(hue, size)
             }
             drawRoundRect(
                 brush = brush,
@@ -389,7 +414,7 @@ fun AlbumCover(
  *
  * While [active] (music playing):
  *  - the aurora gradient flows continuously through the filled part,
- *  - the thumb carries a breathing mint halo,
+ *  - the thumb carries a breathing aurora halo,
  *  - progress glides smoothly between the player's 500 ms position ticks.
  *
  * Large backward jumps (track change, seek from the notification) snap
@@ -414,6 +439,15 @@ fun GradientSeekBar(
     var dragValue by remember { mutableFloatStateOf(progress) }
     val target = (if (dragging) dragValue else progress).coerceIn(0f, 1f)
 
+    // The gesture handlers are installed once (pointerInput(Unit)) but the
+    // callbacks they must invoke can change identity on every recomposition
+    // (they capture parent state like sliderPos). Remembered latest values
+    // keep the long-lived gesture coroutines calling the CURRENT callbacks —
+    // otherwise a stale closure silently seeks through an outdated lambda.
+    val currentOnValueChange by rememberUpdatedState(onValueChange)
+    val currentOnSeekFinished by rememberUpdatedState(onSeekFinished)
+    val currentOnSeekCancelled by rememberUpdatedState(onSeekCancelled)
+
     // Snap on big backward jumps (track change / notification seek) so the
     // bar never glides the wrong way; otherwise tween to erase the 500 ms
     // position ticks. The remembered value lags one composition, which is
@@ -430,6 +464,11 @@ fun GradientSeekBar(
         animationSpec = if (snapNow) snapSpec else glideSpec,
         label = "seekProgress",
     )
+
+    // The global aurora clock — read in the draw phase below so the whole
+    // bar breathes with the app without recomposing. Quantized twin: the
+    // bar's hue reads only need ~8 changes a second, not display rate.
+    val aurora = LocalAuroraColorPhase.current
 
     // Ambient ribbon drift — the silk field floats whether or not music plays.
     val ribbonDrift = rememberInfiniteTransition(label = "seekRibbons")
@@ -490,8 +529,8 @@ fun GradientSeekBar(
                 detectTapGestures(
                     onTap = { offset ->
                         val fraction = (offset.x / size.width).coerceIn(0f, 1f)
-                        onValueChange(fraction)
-                        onSeekFinished()
+                        currentOnValueChange(fraction)
+                        currentOnSeekFinished()
                     },
                 )
             }
@@ -502,21 +541,21 @@ fun GradientSeekBar(
                         dragging = true
                         val fraction = (offset.x / size.width).coerceIn(0f, 1f)
                         dragValue = fraction
-                        onValueChange(fraction)
+                        currentOnValueChange(fraction)
                     },
                     onDrag = { change, _ ->
                         dragValue = (change.position.x / size.width).coerceIn(0f, 1f)
-                        onValueChange(dragValue)
+                        currentOnValueChange(dragValue)
                     },
                     onDragEnd = {
                         dragging = false
-                        onSeekFinished()
+                        currentOnSeekFinished()
                     },
                     onDragCancel = {
                         dragging = false
                         // Gesture stolen/cancelled: abort the drag preview
                         // without committing a seek.
-                        onSeekCancelled()
+                        currentOnSeekCancelled()
                     },
                 )
             },
@@ -532,6 +571,7 @@ fun GradientSeekBar(
             val corner = CornerRadius(barHeight / 2f, barHeight / 2f)
             val barTop = (size.height - barHeight) / 2f
             val fillWidth = size.width * display
+            val hue = aurora.value
 
             // ---- The silk tail: streams from the thumb bead ----
             // Anchored at the bead and stretching back over EXACTLY the
@@ -550,6 +590,7 @@ fun GradientSeekBar(
                         tailLength = fillWidth,
                         wavePhase = ribbonPhase,
                         wavelength = size.width / 2.4f,
+                        hue = hue,
                     )
                 }
             }
@@ -563,9 +604,10 @@ fun GradientSeekBar(
             )
             if (fillWidth > 0f) {
                 val brush = if (active) {
-                    flowingAuroraBrush(size.width, phase, size.height)
+                    flowingAuroraBrush(size.width, phase, size.height, hue)
                 } else {
-                    AppGradients.primaryBrush()
+                    // Paused: the hues still drift slowly with the clock.
+                    auroraBrushAt(hue, size)
                 }
                 drawRoundRect(
                     brush = brush,
@@ -574,31 +616,26 @@ fun GradientSeekBar(
                     cornerRadius = corner,
                 )
             }
-        }
 
-        // Breathing halo — an expanding, fading mint ring behind the bead.
-        if (active) {
-            Box(
-                Modifier
-                    .offset(x = (maxW * display) - 6.dp)
-                    .size(12.dp)
-                    .align(Alignment.CenterStart)
-                    .graphicsLayer {
-                        val s = thumbScale * (1f + breath * 1.2f)
-                        scaleX = s
-                        scaleY = s
-                        alpha = (1f - breath) * 0.6f
-                    }
-                    .clip(CircleShape)
-                    .background(Mint.copy(alpha = 0.5f)),
-            )
+            // ---- Breathing halo — an expanding, fading aurora ring ----
+            // behind the bead (drawn here so it animates in the draw phase).
+            if (active) {
+                val haloScale = thumbScale * (1f + breath * 1.2f)
+                drawCircle(
+                    color = auroraColorAt(hue).copy(alpha = 0.3f * (1f - breath)),
+                    radius = 6.dp.toPx() * haloScale,
+                    center = Offset(fillWidth, size.height / 2f),
+                )
+            }
         }
 
         // Thumb — an aurora bead as thick as the bar, ringed in white so it
-        // reads over both track and fill; pops up while dragged.
+        // reads over both track and fill; pops up while dragged. The offset
+        // lambda reads `display` in the PLACEMENT phase: the 500 ms glide
+        // re-places the bead without recomposing this content at all.
         Box(
             Modifier
-                .offset(x = (maxW * display) - 3.dp)
+                .offset { IntOffset(((maxW.toPx() * display) - 3.dp.toPx()).roundToInt(), 0) }
                 .size(6.dp)
                 .align(Alignment.CenterStart)
                 .graphicsLayer {
@@ -608,12 +645,232 @@ fun GradientSeekBar(
                 .shadow(
                     elevation = 6.dp,
                     shape = CircleShape,
-                    ambientColor = Mint.copy(alpha = 0.55f),
-                    spotColor = Mint.copy(alpha = 0.55f),
+                    ambientColor = Color(0x40000000),
+                    spotColor = Color(0x40000000),
                 )
                 .clip(CircleShape)
-                .background(AppGradients.primaryBrush())
+                .auroraFill(CircleShape)
                 .border(1.dp, Color.White.copy(alpha = 0.85f), CircleShape),
         )
     }
+}
+
+/**
+ * Immersive backdrop shared by the Now Playing and Lyrics screens: the album
+ * cover blurred and dimmed, over a vertical dark scrim, with a faint living
+ * aurora mist drifting on top so even the immersive screens keep breathing
+ * with the rest of the app.
+ */
+@Composable
+fun BlurredCoverBackdrop(cover: String?) {
+    Box(Modifier.fillMaxSize()) {
+        // Modifier.blur is a no-op below API 31 (no RenderEffect): a sharp
+        // full-bleed cover would fight every text on the screen, so on old
+        // devices the backdrop degrades to scrim + aurora only.
+        val blurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        if (cover != null && blurSupported) {
+            AsyncImage(
+                model = cover,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .blur(60.dp)
+                    .alpha(0.4f),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0x33000000), AppGradients.ScrimDark),
+                    ),
+                ),
+        )
+        // No base gradient here — only the soft drifting curtains and stars,
+        // laid gently over the scrim.
+        AuroraSky(
+            dark = true,
+            intensity = 0.55f,
+            base = false,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/**
+ * Shared seek bar + current/total time row for the player screens. While the
+ * user drags, the finger position is shown locally instead of sending a seek
+ * per drag event; the actual seek is committed once when the gesture finishes
+ * (and then held optimistically by [PlayerController] until the player
+ * confirms it, so the bar never rubber-bands back).
+ *
+ * Self-collects [PlayerController.positionMs]: the 2 Hz tick recomposes THIS
+ * component only — the parent screen passes just [isPlaying]/[durationMs]
+ * (which change rarely), so no whole-screen recomposition per tick.
+ */
+@Composable
+fun PlayerSeekBar(
+    isPlaying: Boolean,
+    durationMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    var sliderPos by remember { mutableStateOf<Float?>(null) }
+    val positionMs by PlayerController.positionMs.collectAsState()
+    val maxMs = durationMs.coerceAtLeast(1L)
+    val displayPosMs = sliderPos?.let { (it * maxMs).toLong() }
+        ?: positionMs.coerceIn(0, durationMs)
+
+    Column(modifier) {
+        GradientSeekBar(
+            progress = (displayPosMs / maxMs.toFloat()).coerceIn(0f, 1f),
+            onValueChange = { sliderPos = it },
+            onSeekFinished = {
+                sliderPos?.let { PlayerController.seekTo((it * maxMs).toLong()) }
+                sliderPos = null
+            },
+            onSeekCancelled = { sliderPos = null },
+            active = isPlaying,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+            Text(formatMs(displayPosMs), style = MaterialTheme.typography.labelSmall, color = White70)
+            Spacer(Modifier.weight(1f))
+            Text(formatMs(durationMs), style = MaterialTheme.typography.labelSmall, color = White70)
+        }
+    }
+}
+
+/**
+ * Circular glassy icon button used on the immersive (dark) player screens.
+ * When [accent] is true the icon is tinted with the living aurora accent —
+ * resolved *inside* this button so the per-frame aurora read only ever
+ * recomposes this small leaf, never the caller's screen.
+ */
+@Composable
+fun GlassIconButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color = White70,
+    size: Dp = 48.dp,
+    accent: Boolean = false,
+) {
+    val accentColor = if (accent) auroraAccent() else tint
+    Box(
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Color(0x1FFFFFFF))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = if (accent) accentColor else tint,
+            modifier = Modifier.size(size * 0.55f),
+        )
+    }
+}
+
+/** Simple centered hint text. Callers pass fillMaxSize() to center it. */
+@Composable
+fun EmptyHint(text: String, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Track row used by library screens (favorites / playlist detail), styled as a card. */
+@Composable
+fun TrackRow(
+    track: Track,
+    onClick: () -> Unit,
+    trailing: @Composable () -> Unit = {},
+    resolving: Boolean = false,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 5.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AlbumCover(track.cover, 48.dp, 12.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                track.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (track.author != null) {
+                Text(
+                    track.author,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (resolving) {
+            // 解析音源中: persistent per-row spinner; tap the row again to cancel.
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        trailing()
+    }
+}
+
+/** "新建歌单" input dialog shared by the Now Playing and Library screens.
+ *  Confirm is disabled while the name is blank or a creation is already in
+ *  flight ([busy]) — double-taps could otherwise create "歌单"/"歌单 (1)". */
+@Composable
+fun CreatePlaylistDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+    busy: Boolean = false,
+) {
+    var name by remember { mutableStateOf("") }
+    val trimmed = name.trim()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建歌单") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                placeholder = { Text("歌单名称") },
+                singleLine = true,
+                enabled = !busy,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(trimmed) },
+                enabled = trimmed.isNotBlank() && !busy,
+            ) { Text(if (busy) "创建中…" else "创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
+        },
+    )
 }

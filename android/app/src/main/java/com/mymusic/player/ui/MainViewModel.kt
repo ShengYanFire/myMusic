@@ -6,37 +6,44 @@ import androidx.lifecycle.viewModelScope
 import com.mymusic.player.MyMusicApp
 import com.mymusic.player.data.AppSettings
 import com.mymusic.player.data.LibraryStore
-import com.mymusic.player.data.LyricsRepository
 import com.mymusic.player.data.Playlist
 import com.mymusic.player.data.TrackRepository
 import com.mymusic.player.domain.LyricLine
 import com.mymusic.player.domain.Track
-import com.mymusic.player.network.LyricsClient
 import com.mymusic.player.network.SearchItem
 import com.mymusic.player.player.PlayerController
+import com.mymusic.player.util.runSuspendCatching
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
 
-/** Shared [AndroidViewModel] for the whole app (search, library, settings). */
+/**
+ * Shared [AndroidViewModel] for the whole app: search, recommendations,
+ * library, lyrics and settings. The playback-queue pipeline (resolve cache,
+ * in-flight dedup, queue-context decision, background fill) lives in its own
+ * [PlaybackQueueCoordinator] — a plain class this ViewModel owns and forwards
+ * the play requests to.
+ */
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repo = TrackRepository(MyMusicApp.instance.api, MyMusicApp.instance.settings)
+    // Single shared repository/store instances (stateless singletons created
+    // once in MyMusicApp): one OkHttp connection pool for the whole app.
+    private val repo: TrackRepository = MyMusicApp.instance.trackRepo
     private val library: LibraryStore = MyMusicApp.instance.library
     private val settings = MyMusicApp.instance.settings
 
@@ -68,24 +75,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Select/deselect a genre by id; persisted and picked up by the recommender. */
     fun toggleGenre(genreId: String) {
-        viewModelScope.launch {
-            // Read from the DataStore flow (source of truth) — the StateFlow
-            // may still hold its initial empty value on a very first tap.
-            val current = settings.favoriteGenres.first()
-            settings.setFavoriteGenres(
-                if (genreId in current) current - genreId else current + genreId,
-            )
-        }
+        // Atomic read-modify-write inside ONE DataStore edit: the old
+        // read-flow-then-write raced a second rapid tap into a lost update.
+        viewModelScope.launch { settings.toggleGenre(genreId) }
     }
 
     /** Select/deselect a mood by id; persisted and picked up by the recommender. */
     fun toggleMood(moodId: String) {
-        viewModelScope.launch {
-            val current = settings.favoriteMoods.first()
-            settings.setFavoriteMoods(
-                if (moodId in current) current - moodId else current + moodId,
-            )
-        }
+        viewModelScope.launch { settings.toggleMood(moodId) }
     }
 
     // ---- Library ----
@@ -95,22 +92,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // ---- Messages ----
-    private val _message = MutableStateFlow<String?>(null)
-    val message: StateFlow<String?> = _message.asStateFlow()
+
+    /**
+     * One-shot UI messages (snackbars), as a buffered Channel: unlike a
+     * StateFlow it CONFLATES NOTHING — two rapid messages ("解析音源中…" then
+     * "连播合集…") each get their own snackbar slot instead of the second
+     * overwriting the first before it was shown, and there is no
+     * consumeMessage() race between collectors.
+     */
+    private val _message = Channel<String>(capacity = Channel.BUFFERED)
+    val message: Flow<String> = _message.receiveAsFlow()
 
     fun showMessage(msg: String) {
-        _message.value = msg
-    }
-
-    fun consumeMessage() {
-        _message.value = null
+        _message.trySend(msg)
     }
 
     // ---- Lyrics ----
-    private val lyricsRepo = LyricsRepository(
-        MyMusicApp.instance.api,
-        LyricsClient(MyMusicApp.instance.settings),
-    )
+    private val lyricsRepo = MyMusicApp.instance.lyricsRepo
 
     private val _lyrics = MutableStateFlow(LyricsUiState())
     val lyrics: StateFlow<LyricsUiState> = _lyrics.asStateFlow()
@@ -121,52 +119,70 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Load lyrics for [track] (B站字幕 first, then LRCLIB). No-op when the
      * requested song is already loaded/loading; [force] bypasses the cache.
+     * Keyed by uid — different 分P of one video have different subtitles.
      */
     fun loadLyrics(track: Track, force: Boolean = false) {
         val current = _lyrics.value
-        if (!force && current.bvid == track.bvid &&
+        if (!force && current.uid == track.uid &&
             (current.loading || current.source != null || current.error != null)
         ) {
             return
         }
         val gen = ++lyricsGeneration
-        _lyrics.value = LyricsUiState(bvid = track.bvid, loading = true)
+        // Re-fetching the SAME track keeps its current lines on screen
+        // (stale-while-revalidate) — a refresh should not blank the lyrics
+        // page for the whole round trip.
+        _lyrics.value = if (current.uid == track.uid) {
+            current.copy(loading = true, error = null)
+        } else {
+            LyricsUiState(uid = track.uid, loading = true)
+        }
         viewModelScope.launch {
-            val result = runCatching { lyricsRepo.lyrics(track, force) }
+            val result = runSuspendCatching { lyricsRepo.lyrics(track, force) }
             if (gen != lyricsGeneration) return@launch // a newer request won
             _lyrics.value = result.fold(
                 onSuccess = { lyrics ->
                     if (lyrics != null) {
                         LyricsUiState(
-                            bvid = track.bvid,
+                            uid = track.uid,
                             lines = lyrics.lines,
                             synced = lyrics.synced,
                             source = lyrics.source,
                         )
                     } else {
-                        LyricsUiState(bvid = track.bvid, error = "暂无歌词")
+                        LyricsUiState(uid = track.uid, error = "暂无歌词")
                     }
                 },
                 onFailure = { e ->
-                    LyricsUiState(bvid = track.bvid, error = e.message ?: "歌词加载失败")
+                    LyricsUiState(uid = track.uid, error = e.message ?: "歌词加载失败")
                 },
             )
         }
     }
 
     // ---- Search actions ----
+
+    /** Reset all transient search state (results, error, pagination flags). */
+    private fun resetSearchState() {
+        searchJob?.cancel()
+        searchResults.value = emptyList()
+        searchError.value = null
+        hasMoreSearch.value = false
+        loadingMoreSearch.value = false
+    }
+
     fun onQueryChange(value: String) {
         query.value = value
+        // A blank query means "back to the recommendation feed": reset at
+        // once — no reason to keep stale results/errors around for 400 ms.
+        if (value.isBlank()) {
+            resetSearchState()
+            return
+        }
         searchJob?.cancel()
         loadingMoreSearch.value = false
         searchJob = viewModelScope.launch {
             delay(400) // debounce
-            if (value.isBlank()) {
-                searchResults.value = emptyList()
-                searchError.value = null
-                hasMoreSearch.value = false
-                return@launch
-            }
             doSearch(value.trim())
         }
     }
@@ -181,11 +197,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearSearch() {
         query.value = ""
-        searchResults.value = emptyList()
-        searchError.value = null
-        hasMoreSearch.value = false
-        loadingMoreSearch.value = false
-        searchJob?.cancel()
+        resetSearchState()
     }
 
     private suspend fun doSearch(keyword: String) {
@@ -194,11 +206,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         searchError.value = null
         searchPage = 1
         loadingMoreSearch.value = false
+        // Drop the PREVIOUS search's results right away: showing stale rows
+        // under a "searching" state invites tapping a result from the wrong
+        // query, and the list keeps its scroll anyway.
+        searchResults.value = emptyList()
         try {
             // distinctBy: never let duplicate bvids reach the LazyColumn keys.
             val items = repo.search(keyword, 1).distinctBy { it.bvid }
             searchResults.value = items
             hasMoreSearch.value = items.size >= SEARCH_PAGE_SIZE
+        } catch (e: CancellationException) {
+            // A superseding search cancelled this one: not an error — but
+            // runCatching would have swallowed the cancellation and reported
+            // a bogus "搜索失败" snackbar.
+            throw e
         } catch (e: Exception) {
             searchError.value = e.message ?: "搜索失败，请检查网络"
             hasMoreSearch.value = false
@@ -229,6 +250,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // A full page with nothing new means there is no more content.
                 hasMoreSearch.value =
                     items.size >= SEARCH_PAGE_SIZE && fresh.isNotEmpty()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (gen == searchGeneration) {
                     showMessage("加载更多失败：${e.message ?: "请检查网络"}")
@@ -252,6 +275,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var recommendCursor = 0
 
     /**
+     * Set when a reload was requested while one was already in flight (a
+     * genre/mood change mid-reload): the in-flight pool is built for the OLD
+     * preference, so exactly ONE chained reload runs after it lands — not one
+     * per change, and not zero (which silently kept a personalized-wrong feed
+     * for minutes).
+     */
+    private var reloadPending = false
+    private var reloadPendingKeepOnError = false
+
+    /**
      * Bumped on every successful recommendation reload. The search page
      * observes it to scroll the feed back to its header — notably when the
      * user changes their genre preference and the feed is re-personalized.
@@ -259,32 +292,90 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _recommendGeneration = MutableStateFlow(0)
     val recommendGeneration: StateFlow<Int> = _recommendGeneration.asStateFlow()
 
+    // ---- Playback queue pipeline (delegated to the coordinator) ----
+
+    private val queue = PlaybackQueueCoordinator(
+        repo = repo,
+        scope = viewModelScope,
+        onMessage = ::showMessage,
+        shared = MyMusicApp.instance.audioCache,
+    )
+
+    /** uid of the track currently being resolved by [requestPlay] (row spinner). */
+    val resolvingUid: StateFlow<String?> = queue.resolvingUid
+
+    /** Start playing [tracks][index]; opens the play page via [onOpened]. */
+    fun requestPlay(
+        tracks: List<Track>,
+        index: Int = 0,
+        useListAsQueue: Boolean = false,
+        startPositionMs: Long = 0L,
+        onOpened: () -> Unit,
+    ) = queue.requestPlay(tracks, index, useListAsQueue, startPositionMs, onOpened)
+
+    /** Abort the current [requestPlay] resolution without starting playback. */
+    fun cancelPlay() = queue.cancelPlay()
+
     init {
         loadRecommendations()
+        // 下一首 on-demand: the player asks for entries it cannot play yet
+        // through the needResolveNext FLOW (no static callback a dead
+        // ViewModel could stay registered in), and the coordinator resolves
+        // and inserts them.
+        PlayerController.needResolveNext
+            .onEach { queue.onNeedResolveNext(it) }
+            .launchIn(viewModelScope)
+        // 播单记忆上次进度: restore the last session's queue / song / position
+        // (shown paused), and route a play tap on the not-yet-resolved restored
+        // session back through the coordinator so it re-resolves and resumes.
+        viewModelScope.launch {
+            val saved = runSuspendCatching {
+                MyMusicApp.instance.playbackProgress.state.first()
+            }.getOrNull()
+            if (saved != null) PlayerController.restoreProgress(saved)
+        }
+        PlayerController.needResume
+            .onEach {
+                val s = PlayerController.state.value
+                val tracks = s.queue
+                if (tracks.isEmpty()) return@onEach
+                queue.requestPlay(
+                    tracks = tracks,
+                    index = s.queueIndex.coerceAtLeast(0).coerceAtMost(tracks.lastIndex),
+                    useListAsQueue = true,
+                    onOpened = {},
+                    startPositionMs = PlayerController.positionMs.value.coerceAtLeast(0L),
+                )
+            }
+            .launchIn(viewModelScope)
         // Re-personalize the feed whenever the genre/mood selection changes.
         // The first emission is just the persisted value loaded at startup —
         // the initial [loadRecommendations] already accounts for it.
-        viewModelScope.launch {
-            var previous: Pair<Set<String>, Set<String>>? = null
-            combine(settings.favoriteGenres, settings.favoriteMoods) { g, m -> g to m }
-                .collect { ids ->
-                    val last = previous
-                    previous = ids
-                    if (last != null && ids != last) reloadRecommendations(keepOnError = true)
-                }
-        }
+        combine(settings.favoriteGenres, settings.favoriteMoods) { g, m -> g to m }
+            .distinctUntilChanged()
+            .drop(1)
+            .onEach { reloadRecommendations(keepOnError = true) }
+            .launchIn(viewModelScope)
     }
 
     fun loadRecommendations() = reloadRecommendations(keepOnError = false)
 
     /**
-     * 下拉刷新: re-fetch every source into a fresh mixed+shuffled pool and
-     * restart from the first batch; on failure keep the current list and notify.
+     * 下拉刷新/重新个性化: re-fetch every source into a fresh mixed+shuffled
+     * pool and restart from the first batch; on failure keep the current list
+     * and notify. Requests landing while a reload is in flight coalesce into
+     * one chained reload.
      */
     fun refreshRecommendations() = reloadRecommendations(keepOnError = true)
 
     private fun reloadRecommendations(keepOnError: Boolean) {
-        if (loadingRecommendations.value) return
+        if (loadingRecommendations.value) {
+            // Coalesce: whatever the in-flight reload fetches was built for
+            // the old preference — one chained reload afterwards is enough.
+            reloadPending = true
+            reloadPendingKeepOnError = reloadPendingKeepOnError || keepOnError
+            return
+        }
         loadingRecommendations.value = true
         recommendError.value = null
         viewModelScope.launch {
@@ -296,6 +387,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 recommendations.value = pool.take(RECOMMEND_BATCH)
                 hasMoreRecommendations.value = pool.size > RECOMMEND_BATCH
                 _recommendGeneration.value++
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (keepOnError && recommendations.value.isNotEmpty()) {
                     // Refresh failed: keep the current list visible, just notify.
@@ -305,6 +398,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 loadingRecommendations.value = false
+                val chain = reloadPending
+                val chainKeep = reloadPendingKeepOnError
+                reloadPending = false
+                reloadPendingKeepOnError = false
+                if (chain) {
+                    // The preference changed mid-flight: rebuild for the NEW one.
+                    reloadRecommendations(keepOnError = chainKeep)
+                }
             }
         }
     }
@@ -332,113 +433,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val SEARCH_PAGE_SIZE = 20
     }
 
-    // ---- Playback support ----
-
-    /** Background job extending the play queue of the last [playFromList] call. */
-    private var queueJob: Job? = null
-
-    /** Bumped on every [playFromList] call so stale background results are dropped. */
-    private var queueGeneration = 0
-
-    /**
-     * Play [tracks][index] in its list context:
-     * 1. resolve the tapped song (and, in parallel, the next one) and start
-     *    playback right away — as fast as the old single-song flow;
-     * 2. resolve the rest of the list in the background and arrange the songs
-     *    around the playing one, so 上一首/下一首 walk the whole list instead
-     *    of being stuck on a one-song queue.
-     *
-     * Returns false (with a toast) when the tapped song has no playable audio.
-     */
-    suspend fun playFromList(tracks: List<Track>, index: Int = 0): Boolean {
-        if (tracks.isEmpty()) return false
-        val i = index.coerceIn(tracks.indices)
-        val tapped = tracks[i]
-        val gen = ++queueGeneration
-        queueJob?.cancel()
-        showMessage("解析音源中…")
-        // Resolve the tapped song first so playback starts immediately; the
-        // next song resolves in parallel so 下一首 responds right away.
-        val (tappedResult, resolvedNext) = coroutineScope {
-            val nextDeferred = async {
-                tracks.getOrNull(i + 1)?.let { next -> resolveAudioResult(next).getOrNull() }
-            }
-            val result = resolveAudioResult(tapped)
-            if (result.getOrDefault(tapped).hasAudio) {
-                result to nextDeferred.await()
-            } else {
-                nextDeferred.cancel() // failed anyway — don't wait for the lookahead
-                result to null
-            }
-        }
-        if (gen != queueGeneration) return true // a newer request took over
-        val resolvedTapped = tappedResult.getOrDefault(tapped)
-        if (!resolvedTapped.hasAudio) {
-            showMessage("播放失败：${tappedResult.exceptionOrNull()?.message ?: "无法获取音源"}")
-            return false
-        }
-        val head = buildList {
-            add(resolvedTapped)
-            if (resolvedNext?.hasAudio == true) add(resolvedNext)
-        }
-        PlayerController.playQueue(head)
-        // Build the rest of the queue in the background: the songs before the
-        // tapped one are later inserted ahead of it, the rest appended after.
-        if (tracks.size > head.size) {
-            queueJob = viewModelScope.launch {
-                val skipNext = resolvedNext?.hasAudio == true
-                val before = tracks.take(i)
-                val after = tracks.drop(i + if (skipNext) 2 else 1)
-                val resolved = resolveQueue(before + after)
-                if (gen != queueGeneration) return@launch // superseded meanwhile
-                PlayerController.insertQueue(
-                    before = resolved.take(before.size).filter { it.hasAudio },
-                    after = resolved.drop(before.size).filter { it.hasAudio },
-                    pivotBvid = resolvedTapped.bvid,
-                )
-            }
-        }
-        return true
-    }
-
-    /** [resolveAudio][TrackRepository.resolveAudio] wrapped as a [Result], letting cancellation through. */
-    private suspend fun resolveAudioResult(track: Track): Result<Track> = try {
-        Result.success(repo.resolveAudio(track))
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Result.failure(e)
-    }
-
-    /**
-     * Resolve audio URLs for a whole queue in parallel with bounded concurrency
-     * (avoid hammering Bilibili with N simultaneous calls), preserving input
-     * order. A track that fails to resolve keeps its original value; the player
-     * skips entries without a usable URL.
-     */
-    suspend fun resolveQueue(
-        tracks: List<Track>,
-        concurrency: Int = 4,
-    ): List<Track> = withContext(Dispatchers.Default) {
-        val semaphore = Semaphore(concurrency)
-        coroutineScope {
-            tracks.map { t ->
-                async {
-                    semaphore.withPermit {
-                        runCatching { repo.resolveAudio(t) }.getOrDefault(t)
-                    }
-                }
-            }.awaitAll()
-        }
-    }
-
     // ---- Library actions ----
     suspend fun toggleFavorite(track: Track) = library.toggleFavorite(track)
     suspend fun createPlaylist(name: String) = library.createPlaylist(name)
     suspend fun addToPlaylist(playlistId: String, track: Track) =
         library.addToPlaylist(playlistId, track)
-    suspend fun removeFromPlaylist(playlistId: String, bvid: String) =
-        library.removeFromPlaylist(playlistId, bvid)
+
+    /** Remove the track with [uid] from a playlist (uid, not bvid: multi-P
+     *  entries of one video are distinct songs). Returns false when it was
+     *  not in the list. */
+    suspend fun removeFromPlaylist(playlistId: String, uid: String) =
+        library.removeFromPlaylist(playlistId, uid)
     suspend fun deletePlaylist(playlistId: String) = library.deletePlaylist(playlistId)
     suspend fun renamePlaylist(playlistId: String, name: String) =
         library.renamePlaylist(playlistId, name)
@@ -451,8 +456,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
 /** Lyrics page state for the currently requested track. */
 data class LyricsUiState(
-    /** bvid of the track these lyrics belong to; null before the first request. */
-    val bvid: String? = null,
+    /** uid of the track these lyrics belong to (bvid, or bvid-P<n> for a 分P); null before the first request. */
+    val uid: String? = null,
     val loading: Boolean = false,
     val lines: List<LyricLine> = emptyList(),
     /** False for plain untimed lyrics (static list, no highlight/scroll). */

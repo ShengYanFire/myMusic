@@ -36,19 +36,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import com.mymusic.player.data.Playlist
 import com.mymusic.player.domain.Track
-import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.Mint
+import com.mymusic.player.ui.theme.AuroraIcon
 import com.mymusic.player.ui.theme.Rose
+import com.mymusic.player.ui.theme.auroraFill
 import kotlinx.coroutines.launch
 
 @Composable
@@ -58,10 +58,14 @@ fun LibraryScreen(
 ) {
     val favorites by vm.favorites.collectAsState()
     val playlists by vm.playlists.collectAsState()
+    val resolvingUid by vm.resolvingUid.collectAsState()
     val scope = rememberCoroutineScope()
 
-    var tab by remember { mutableStateOf(0) }
-    var selectedId by remember { mutableStateOf<String?>(null) }
+    // rememberSaveable: the chosen tab / open playlist detail survive
+    // configuration changes (rotation) and process death instead of
+    // silently dumping the user back onto the favorites tab.
+    var tab by rememberSaveable { mutableStateOf(0) }
+    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
 
     // Derive the detail playlist from the live flow so removals / renames
@@ -72,19 +76,22 @@ fun LibraryScreen(
         val playlist = selectedPlaylist
         PlaylistDetailScreen(
             playlist = playlist,
+            resolvingUid = resolvingUid,
             onBack = { selectedId = null },
             onPlayAll = {
-                scope.launch {
-                    if (vm.playFromList(playlist.tracks)) onOpenPlayer()
+                vm.requestPlay(playlist.tracks, useListAsQueue = true) { onOpenPlayer() }
+            },
+            onPlay = play@{ list, index ->
+                val track = list.getOrNull(index) ?: return@play
+                if (resolvingUid == track.uid) {
+                    vm.cancelPlay()
+                } else {
+                    vm.requestPlay(list, index, useListAsQueue = true) { onOpenPlayer() }
                 }
             },
-            onPlay = { list, index ->
-                scope.launch {
-                    if (vm.playFromList(list, index)) onOpenPlayer()
-                }
-            },
-            onRemove = { bvid ->
-                scope.launch { vm.removeFromPlaylist(playlist.id, bvid) }
+            onRemove = { uid ->
+                // uid (not bvid): removes THIS 分P, not every page of the video.
+                scope.launch { vm.removeFromPlaylist(playlist.id, uid) }
             },
             onRename = { name ->
                 scope.launch { vm.renamePlaylist(playlist.id, name) }
@@ -113,9 +120,13 @@ fun LibraryScreen(
         when (tab) {
             0 -> FavoritesContent(
                 favorites = favorites,
-                onPlay = { index ->
-                    scope.launch {
-                        if (vm.playFromList(favorites, index)) onOpenPlayer()
+                resolvingUid = resolvingUid,
+                onPlay = play@{ index ->
+                    val track = favorites.getOrNull(index) ?: return@play
+                    if (resolvingUid == track.uid) {
+                        vm.cancelPlay()
+                    } else {
+                        vm.requestPlay(favorites, index, useListAsQueue = true) { onOpenPlayer() }
                     }
                 },
                 onRemove = { track -> scope.launch { vm.toggleFavorite(track) } },
@@ -129,19 +140,28 @@ fun LibraryScreen(
     }
 
     if (showCreateDialog) {
+        var createBusy by remember { mutableStateOf(false) }
         CreatePlaylistDialog(
-            onDismiss = { showCreateDialog = false },
+            onDismiss = { if (!createBusy) showCreateDialog = false },
+            busy = createBusy,
             onConfirm = { name ->
                 scope.launch {
-                    vm.createPlaylist(name.ifBlank { "新歌单" })
-                    showCreateDialog = false
+                    createBusy = true
+                    try {
+                        // A blank name never reaches here (confirm disabled);
+                        // the store still guards against empty names itself.
+                        vm.createPlaylist(name)
+                        showCreateDialog = false
+                    } finally {
+                        createBusy = false
+                    }
                 }
             },
         )
     }
 }
 
-/** Pill-shaped segmented control with a gradient indicator. */
+/** Pill-shaped segmented control with a living gradient indicator. */
 @Composable
 private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
     val options = listOf("收藏", "歌单")
@@ -159,8 +179,8 @@ private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
                 Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        if (isSelected) AppGradients.primaryBrush() else SolidColor(Color.Transparent),
+                    .then(
+                        if (isSelected) Modifier.auroraFill(RoundedCornerShape(12.dp)) else Modifier,
                     )
                     .clickable { onSelect(i) }
                     .padding(vertical = 10.dp),
@@ -179,6 +199,7 @@ private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
 @Composable
 private fun FavoritesContent(
     favorites: List<Track>,
+    resolvingUid: String?,
     onPlay: (Int) -> Unit,
     onRemove: (Track) -> Unit,
 ) {
@@ -195,10 +216,11 @@ private fun FavoritesContent(
                 modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp),
             )
         }
-        itemsIndexed(favorites, key = { _, track -> track.bvid }) { index, track ->
+        itemsIndexed(favorites, key = { _, track -> track.uid }) { index, track ->
             TrackRow(
                 track = track,
                 onClick = { onPlay(index) },
+                resolving = resolvingUid == track.uid,
                 trailing = {
                     IconButton(onClick = { onRemove(track) }) {
                         Icon(
@@ -258,7 +280,7 @@ private fun PlaylistsContent(
                                 .size(48.dp)
                                 .shadow(6.dp, RoundedCornerShape(14.dp))
                                 .clip(RoundedCornerShape(14.dp))
-                                .background(AppGradients.primaryBrush()),
+                                .auroraFill(RoundedCornerShape(14.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
@@ -279,11 +301,7 @@ private fun PlaylistsContent(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        Icon(
-                            Icons.Filled.PlayArrow,
-                            contentDescription = "播放",
-                            tint = Mint,
-                        )
+                        AuroraIcon(Icons.Filled.PlayArrow, contentDescription = "播放")
                     }
                 }
             }
@@ -294,6 +312,7 @@ private fun PlaylistsContent(
 @Composable
 private fun PlaylistDetailScreen(
     playlist: Playlist,
+    resolvingUid: String?,
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onPlay: (List<Track>, Int) -> Unit,
@@ -321,7 +340,7 @@ private fun PlaylistDetailScreen(
                 onClick = onPlayAll,
                 enabled = playlist.tracks.isNotEmpty(),
             ) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = "全部播放", tint = Mint)
+                AuroraIcon(Icons.Filled.PlayArrow, contentDescription = "全部播放")
             }
             IconButton(onClick = { showRenameDialog = true }) {
                 Icon(Icons.Filled.Edit, contentDescription = "重命名歌单")
@@ -356,12 +375,13 @@ private fun PlaylistDetailScreen(
                     )
                 }
             }
-            itemsIndexed(playlist.tracks, key = { _, track -> track.bvid }) { index, track ->
+            itemsIndexed(playlist.tracks, key = { _, track -> track.uid }) { index, track ->
                 TrackRow(
                     track = track,
                     onClick = { onPlay(playlist.tracks, index) },
+                    resolving = resolvingUid == track.uid,
                     trailing = {
-                        IconButton(onClick = { onRemove(track.bvid) }) {
+                        IconButton(onClick = { onRemove(track.uid) }) {
                             Icon(Icons.Filled.Close, contentDescription = "移除")
                         }
                     },

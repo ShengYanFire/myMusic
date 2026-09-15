@@ -1,13 +1,15 @@
 package com.mymusic.player.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -15,11 +17,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 // ---------------------------------------------------------------------------
-// Palette — "Aurora Breeze": fresh mint, sky blue and soft iris.
+// Palette — "Living Aurora" (极光动态变色).
 //
-// The identity is 清新 (fresh mint/sky) + 淡雅 (low-saturation surfaces)
-// with a 炫酷 aurora gradient (mint → sky → iris) as the single accent
-// family shared by every screen in the app.
+// The static Material colors below stay in the cool mint/sky/iris family so
+// ink, placeholders and outlines remain calm and readable, while every
+// *gradient & accent surface* in the app is animated by [AuroraFlow]: colors
+// continuously drift around a circular aurora spectrum (green → teal → cyan
+// → iris → violet → rose) on one shared 16-second clock. See AuroraFlow.kt.
 // ---------------------------------------------------------------------------
 
 // Signature gradient stops (shared by both themes so the accents always pop).
@@ -27,6 +31,11 @@ val Mint = Color(0xFF2DD4BF)   // 薄荷青 — fresh, airy primary
 val Sky = Color(0xFF38BDF8)    // 天空蓝 — luminous middle stop
 val Iris = Color(0xFF818CF8)   // 鸢尾蓝 — cool, elegant end stop
 val Rose = Color(0xFFFB7185)   // 淡玫瑰 — used only for the favorite heart
+
+// Overlay text colors for the immersive dark screens (Now Playing / Lyrics),
+// which sit on blurred album art and always draw light text.
+val White70 = Color(0xB3FFFFFF)
+val White40 = Color(0x66FFFFFF)
 
 // Dark theme — a deep "aurora night" ocean: near-black teal, never flat gray.
 val DarkBgDeep = Color(0xFF050E12)
@@ -117,15 +126,29 @@ private val AppTypography = Typography(
     labelSmall = TextStyle(fontSize = 11.sp, letterSpacing = 0.4.sp),
 )
 
+/**
+ * Whether the app is currently rendering its dark theme, published as a
+ * CompositionLocal by [MyMusicTheme]. The aurora visuals need the theme
+ * branch in many leaf spots (sky gradients, glass tints); reading this local
+ * keeps those leaves theme-driven WITHOUT each of them calling
+ * isSystemInDarkTheme() (a configuration lookup that breaks whenever a
+ * screen is composed with an explicit theme override, e.g. tests/previews).
+ */
+val LocalIsDarkTheme = staticCompositionLocalOf { false }
+
 @Composable
 fun MyMusicTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
-    MaterialTheme(
-        colorScheme = if (darkTheme) DarkColors else LightColors,
-        shapes = AppShapes,
-        typography = AppTypography,
-        content = content,
-    )
+    CompositionLocalProvider(LocalIsDarkTheme provides darkTheme) {
+        MaterialTheme(
+            colorScheme = if (darkTheme) DarkColors else LightColors,
+            shapes = AppShapes,
+            typography = AppTypography,
+        ) {
+            // Host the shared aurora clock so every screen breathes together.
+            ProvideAurora { content() }
+        }
+    }
 }

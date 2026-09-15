@@ -1,8 +1,13 @@
 package com.mymusic.player.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,8 +46,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -57,7 +62,10 @@ import coil.compose.AsyncImage
 import com.mymusic.player.player.PlayerController
 import com.mymusic.player.player.PlayerUiState
 import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.Mint
+import com.mymusic.player.ui.theme.AuroraSky
+import com.mymusic.player.ui.theme.AuroraText
+import com.mymusic.player.ui.theme.LocalIsDarkTheme
+import com.mymusic.player.ui.theme.auroraFill
 
 object Routes {
     const val SEARCH = "search"
@@ -76,6 +84,13 @@ private val navItems = listOf(
     NavItem(Routes.LIBRARY, "我的", Icons.Filled.LibraryMusic),
     NavItem(Routes.SETTINGS, "设置", Icons.Filled.Settings),
 )
+
+// The bottom bar / mini player sit on the dark translucent "glass" gradient,
+// which over a LIGHT pastel sky still needs light text: fixed white-ish tones
+// keep readable contrast in both themes (instead of theme-driven onSurface,
+// which flips to near-black on light and disappears into the glass).
+private val BarContentColor = Color.White
+private val BarContentColorVariant = Color.White.copy(alpha = 0.74f)
 
 /**
  * Navigate to a bottom-bar tab destination (bottom bar taps, mini player opens,
@@ -101,6 +116,11 @@ private fun NavHostController.navigateToTab(route: String) {
     }
 }
 
+/** Push a detail route (歌词 / 登录) without stacking duplicates of it. */
+private fun NavHostController.navigateToDetail(route: String) {
+    navigate(route) { launchSingleTop = true }
+}
+
 @Composable
 fun MainScreen(vm: MainViewModel = viewModel()) {
     val navController = rememberNavController()
@@ -108,20 +128,35 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
     val currentRoute = currentDestination?.route
+    // PlayerUiState no longer carries the 2 Hz position — this collection
+    // re-emits only on real state changes (track switch, play/pause, error),
+    // so MainScreen itself stops recomposing twice a second. The progress
+    // tick is collected by the one leaf that draws it (MiniPlayer).
     val playerState by PlayerController.state.collectAsState()
 
+    // Buffered one-shot Channel: every message gets its own snackbar slot,
+    // nothing to reset afterwards.
     LaunchedEffect(Unit) {
         vm.message.collect { msg ->
-            if (msg != null) {
-                snackbarHostState.showSnackbar(msg)
-                vm.consumeMessage()
-            }
+            snackbarHostState.showSnackbar(msg)
         }
     }
 
     val showMiniPlayer = currentRoute != Routes.NOW_PLAYING &&
         currentRoute != Routes.LYRICS &&
         currentRoute != Routes.LOGIN
+
+    // The aurora sky gently brightens while music plays and dims when idle.
+    val skyIntensity by animateFloatAsState(
+        targetValue = if (playerState.isPlaying) 1f else 0.72f,
+        animationSpec = tween(900),
+        label = "skyIntensity",
+    )
+
+    // Now Playing and Lyrics paint their own full-screen sky — drawing the
+    // outer one underneath would double the per-frame aurora cost (two
+    // animated gradients composited over each other) for pixels nobody sees.
+    val showOuterSky = currentRoute != Routes.NOW_PLAYING && currentRoute != Routes.LYRICS
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -143,15 +178,28 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             }
         },
     ) { innerPadding ->
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(AppGradients.backgroundBrush(isSystemInDarkTheme())),
-        ) {
+        Box(Modifier.fillMaxSize()) {
+            // The living aurora sky — deep night with drifting curtains and
+            // twinkling stars (dark) or a pale pastel morning (light).
+            if (showOuterSky) {
+                AuroraSky(
+                    dark = LocalIsDarkTheme.current,
+                    intensity = skyIntensity,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             NavHost(
                 navController = navController,
                 startDestination = Routes.SEARCH,
                 modifier = Modifier.padding(innerPadding),
+                // Brisk ~200 ms cross-fades (the 700 ms defaults made tab
+                // switches feel laggy) with a hint of vertical slide.
+                enterTransition = { fadeIn(tween(200)) + slideInVertically(tween(200)) { it / 16 } },
+                exitTransition = { fadeOut(tween(170)) },
+                popEnterTransition = { fadeIn(tween(200)) },
+                popExitTransition = {
+                    fadeOut(tween(170)) + slideOutVertically(tween(200)) { it / 16 }
+                },
             ) {
                 composable(Routes.SEARCH) {
                     SearchScreen(
@@ -163,7 +211,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 composable(Routes.NOW_PLAYING) {
                     NowPlayingScreen(
                         vm = vm,
-                        onOpenLyrics = { navController.navigate(Routes.LYRICS) },
+                        onOpenLyrics = { navController.navigateToDetail(Routes.LYRICS) },
                     )
                 }
                 composable(Routes.LYRICS) {
@@ -181,7 +229,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 composable(Routes.SETTINGS) {
                     SettingsScreen(
                         vm = vm,
-                        onOpenLogin = { navController.navigate(Routes.LOGIN) },
+                        onOpenLogin = { navController.navigateToDetail(Routes.LOGIN) },
                     )
                 }
                 composable(Routes.LOGIN) {
@@ -204,8 +252,11 @@ private fun MiniPlayer(
     onNext: () -> Unit,
 ) {
     val current = state.current ?: return
+    // The only progress-bearing leaf on this screen: it collects the 2 Hz
+    // position flow ITSELF, so the tick recomposes nothing above this line.
+    val positionMs by PlayerController.positionMs.collectAsState()
     val fraction = if (state.durationMs > 0) {
-        (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
+        (positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
     } else {
         0f
     }
@@ -236,46 +287,46 @@ private fun MiniPlayer(
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(14.dp)),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                contentScale = ContentScale.Crop,
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     current.title,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = BarContentColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     current.author ?: "",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = BarContentColorVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
             Spacer(Modifier.width(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Play/pause — a small aurora bead.
+                // Play/pause — a small living aurora bead.
                 Box(
                     Modifier
                         .size(38.dp)
                         .shadow(
                             elevation = 6.dp,
                             shape = CircleShape,
-                            ambientColor = Mint.copy(alpha = 0.45f),
-                            spotColor = Mint.copy(alpha = 0.45f),
+                            ambientColor = Color(0x40000000),
+                            spotColor = Color(0x40000000),
                         )
                         .clip(CircleShape)
-                        .background(AppGradients.primaryBrush())
+                        .auroraFill(CircleShape)
                         .clickable(onClick = onToggle),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = if (state.isPlaying) "暂停" else "播放",
-                        tint = Color.White,
+                        tint = BarContentColor,
                         modifier = Modifier.size(22.dp),
                     )
                 }
@@ -290,7 +341,7 @@ private fun MiniPlayer(
                     Icon(
                         Icons.Filled.SkipNext,
                         contentDescription = "下一首",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = BarContentColorVariant,
                     )
                 }
             }
@@ -305,7 +356,7 @@ private fun MiniPlayer(
     }
 }
 
-/** Custom aurora bottom navigation bar with a glass background + gradient pill indicator. */
+/** Custom aurora bottom navigation bar with a glass background + living gradient pill indicator. */
 @Composable
 private fun AuroraBottomBar(
     currentRoute: String?,
@@ -320,12 +371,12 @@ private fun AuroraBottomBar(
                 ),
             ),
     ) {
-        // Aurora hairline on top of the bar.
+        // Living aurora hairline on top of the bar — hues drift forever.
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(1.dp)
-                .background(AppGradients.primaryBrush()),
+                .auroraFill(phaseOffset = 0.1f),
         )
         Row(
             Modifier
@@ -352,51 +403,44 @@ private fun AuroraBottomBar(
                                 .shadow(
                                     elevation = if (selected) 10.dp else 0.dp,
                                     shape = CircleShape,
-                                    ambientColor = Mint.copy(alpha = 0.5f),
-                                    spotColor = Mint.copy(alpha = 0.5f),
+                                    ambientColor = Color(0x40000000),
+                                    spotColor = Color(0x40000000),
                                 )
                                 .clip(CircleShape)
-                                .background(
-                                    if (selected) AppGradients.primaryBrush() else SolidColor(Color.Transparent),
+                                .then(
+                                    if (selected) Modifier.auroraFill(CircleShape) else Modifier,
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
                                 item.icon,
                                 contentDescription = item.label,
-                                tint = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                tint = if (selected) {
+                                    BarContentColor
+                                } else {
+                                    BarContentColorVariant
+                                },
                                 modifier = Modifier.size(20.dp),
                             )
                         }
                         Spacer(Modifier.height(3.dp))
-                        Text(
-                            item.label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (selected) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        )
+                        if (selected) {
+                            // Label breathes with the aurora (scoped leaf).
+                            AuroraText(
+                                item.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        } else {
+                            Text(
+                                item.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = BarContentColorVariant,
+                            )
+                        }
                     }
                 }
             }
         }
-    }
-}
-
-/** Simple centered hint text. Callers pass fillMaxSize() to center it. */
-@Composable
-fun EmptyHint(text: String, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier,
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }

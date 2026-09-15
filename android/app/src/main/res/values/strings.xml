@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">MyMusic</string>
+    <string name="notification_permission_denied">未授予通知权限：后台播放时将看不到媒体通知与控制按钮（可在系统设置中开启）</string>
 </resources>

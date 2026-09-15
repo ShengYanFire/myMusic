@@ -13,11 +13,8 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionToken
-import com.mymusic.player.MyMusicApp
-import com.mymusic.player.network.BiliDirectClient
+import com.mymusic.player.network.BiliHeaders
 import com.mymusic.player.ui.MainActivity
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 
 /**
  * Media3 session service: keeps playing in the background, shows a media
@@ -30,24 +27,20 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // Bilibili audio CDN requires Referer / User-Agent headers, may need the
-        // login cookie for higher-quality streams, and often redirects to mirror
-        // nodes across protocols — so allow those.
-        val cookie = runCatching {
-            runBlocking { MyMusicApp.instance.settings.cookie.first() }
-        }.getOrDefault("")
-
+        // Bilibili audio CDN requires Referer / User-Agent headers and often
+        // redirects to mirror nodes across protocols — so allow those.
+        //
+        // No Cookie here, deliberately:
+        //  - the audio QUALITY is decided by the playurl API call (which does
+        //    carry the login cookie); the CDN itself only needs Referer+UA;
+        //  - keeping the session token off the media path means it can never
+        //    leak onto a cleartext CDN URL or cross-protocol redirect, and a
+        //    re-login needs no service restart for playback headers to match.
         val defaultHeaders = buildMap {
-            put("Referer", "https://www.bilibili.com/")
-            // Bilibili's third-party CDN nodes (upos-sz-estg*) reject mobile /
-            // custom User-Agents with HTTP 403 and only serve desktop browser
-            // agents, so send a desktop Chrome UA for audio requests
-            // (same constant the API client signs with).
-            put("User-Agent", BiliDirectClient.UA)
-            if (cookie.isNotBlank()) put("Cookie", cookie)
+            put("Referer", BiliHeaders.REFERER)
+            put("User-Agent", BiliHeaders.DESKTOP_UA)
         }
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(BiliDirectClient.UA)
             .setDefaultRequestProperties(defaultHeaders)
             .setAllowCrossProtocolRedirects(true)
 

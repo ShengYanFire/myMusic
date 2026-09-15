@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Cleartext (http://) stays blocked globally, but Bilibili's CDN nodes
-     occasionally serve audio over http:// or redirect across protocols.
-     Allow it only for Bilibili-related domains. -->
+<!-- Cleartext (http://) stays blocked globally, but Bilibili's media CDN
+     nodes occasionally serve audio over http:// or redirect across protocols.
+     Allow it ONLY for the media/image CDN domains (no session token is ever
+     sent on that path — see PlaybackService/LyricsClient); the API domain
+     (bilibili.com) itself always speaks https. -->
 <network-security-config>
     <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">bilibili.com</domain>
         <domain includeSubdomains="true">bilivideo.com</domain>
         <domain includeSubdomains="true">hdslb.com</domain>
+        <domain includeSubdomains="true">akamaized.net</domain>
+        <domain includeSubdomains="true">bilivideo.cn</domain>
     </domain-config>
 </network-security-config>

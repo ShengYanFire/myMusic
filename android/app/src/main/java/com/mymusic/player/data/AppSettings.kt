@@ -44,7 +44,27 @@ class AppSettings(private val context: Context) {
 
     suspend fun setQuality(value: String) {
         context.settingsDataStore.edit { prefs ->
-            prefs[qualityKey] = if (value == "low") "low" else "high"
+            prefs[qualityKey] = if (value == QUALITY_LOW) QUALITY_LOW else QUALITY_HIGH
+        }
+    }
+
+    /**
+     * Atomically toggle one genre id. The read AND the write happen inside the
+     * same DataStore edit transaction — two rapid taps can never read the same
+     * stale set and overwrite each other's selection.
+     */
+    suspend fun toggleGenre(id: String) {
+        context.settingsDataStore.edit { prefs ->
+            val current = prefs[favoriteGenresKey] ?: emptySet()
+            prefs[favoriteGenresKey] = if (id in current) current - id else current + id
+        }
+    }
+
+    /** Same as [toggleGenre] for listening moods. */
+    suspend fun toggleMood(id: String) {
+        context.settingsDataStore.edit { prefs ->
+            val current = prefs[favoriteMoodsKey] ?: emptySet()
+            prefs[favoriteMoodsKey] = if (id in current) current - id else current + id
         }
     }
 
@@ -91,5 +111,9 @@ class AppSettings(private val context: Context) {
 
     companion object {
         const val DEFAULT_QUALITY = "high"
+
+        /** Quality preference values — referenced by settings UI and the player. */
+        const val QUALITY_HIGH = "high"
+        const val QUALITY_LOW = "low"
     }
 }

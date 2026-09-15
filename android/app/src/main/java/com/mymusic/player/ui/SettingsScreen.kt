@@ -44,16 +44,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mymusic.player.data.AppSettings
 import com.mymusic.player.domain.MusicGenres
 import com.mymusic.player.domain.MusicMoods
-import com.mymusic.player.ui.theme.AppGradients
+import com.mymusic.player.ui.theme.AuroraText
+import com.mymusic.player.ui.theme.auroraFill
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -73,7 +74,13 @@ fun SettingsScreen(
     var moodsExpanded by rememberSaveable { mutableStateOf(false) }
 
     var testing by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<String?>(null) }
+    // Typed result (Boolean?: null = not tested yet) — the old String? +
+    // contains("正常") check broke the moment a message wording changed.
+    var testOk by remember { mutableStateOf<Boolean?>(null) }
+
+    // Static option tables — remembered instead of rebuilt per recomposition.
+    val genreOptions = remember { MusicGenres.ALL.map { it.id to it.label } }
+    val moodOptions = remember { MusicMoods.ALL.map { it.id to it.label } }
 
     Column(
         Modifier
@@ -110,7 +117,7 @@ fun SettingsScreen(
             title = "音乐偏好",
             icon = Icons.Filled.Tune,
             description = "选择喜欢的音乐类型（可多选），与心情偏好一起决定推荐内容；不选则随机推荐热门音乐。",
-            options = MusicGenres.ALL.map { it.id to it.label },
+            options = genreOptions,
             selectedIds = favoriteGenres,
             onToggleOption = vm::toggleGenre,
             expanded = genresExpanded,
@@ -125,7 +132,7 @@ fun SettingsScreen(
             title = "心情偏好",
             icon = Icons.Filled.Mood,
             description = "选择想听的心情（可多选），与音乐类型一起决定推荐内容。",
-            options = MusicMoods.ALL.map { it.id to it.label },
+            options = moodOptions,
             selectedIds = favoriteMoods,
             onToggleOption = vm::toggleMood,
             expanded = moodsExpanded,
@@ -140,15 +147,15 @@ fun SettingsScreen(
             Row(Modifier.fillMaxWidth()) {
                 QualityOption(
                     label = "高清（默认）",
-                    selected = quality != "low",
-                    onClick = { scope.launch { vm.saveQuality("high") } },
+                    selected = quality != AppSettings.QUALITY_LOW,
+                    onClick = { scope.launch { vm.saveQuality(AppSettings.QUALITY_HIGH) } },
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.size(12.dp))
                 QualityOption(
                     label = "流畅（省流量）",
-                    selected = quality == "low",
-                    onClick = { scope.launch { vm.saveQuality("low") } },
+                    selected = quality == AppSettings.QUALITY_LOW,
+                    onClick = { scope.launch { vm.saveQuality(AppSettings.QUALITY_LOW) } },
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -176,13 +183,13 @@ fun SettingsScreen(
                 onClick = {
                     scope.launch {
                         testing = true
-                        testResult = null
-                        testResult = if (vm.testConnection()) "B 站连接正常" else "无法连接 B 站"
+                        testOk = null
+                        testOk = vm.testConnection()
                         testing = false
                     }
                 },
                 enabled = !testing,
-                brush = AppGradients.accentBrush(),
+                phaseOffset = 0.33f,
                 modifier = Modifier.fillMaxWidth(),
             )
             if (testing) {
@@ -197,12 +204,12 @@ fun SettingsScreen(
                     )
                 }
             }
-            testResult?.let {
+            testOk?.let { ok ->
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    it,
+                    if (ok) "B 站连接正常" else "无法连接 B 站",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (it.contains("正常")) Color(0xFF34D399) else MaterialTheme.colorScheme.error,
+                    color = if (ok) Color(0xFF34D399) else MaterialTheme.colorScheme.error,
                 )
             }
         }
@@ -242,7 +249,7 @@ private fun SettingCard(
                 Modifier
                     .size(30.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(AppGradients.primaryBrush()),
+                    .auroraFill(RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -271,11 +278,13 @@ private fun QualityOption(
     Box(
         modifier = modifier
             .clip(shape)
-            .background(
+            .then(
                 if (selected) {
-                    AppGradients.primaryBrush()
+                    Modifier.auroraFill(shape)
                 } else {
-                    SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                    Modifier.background(
+                        SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                    )
                 },
             )
             .clickable(onClick = onClick)
@@ -333,7 +342,7 @@ private fun CollapsiblePreferenceCard(
                 Modifier
                     .size(30.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(AppGradients.primaryBrush()),
+                    .auroraFill(RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -381,44 +390,52 @@ private fun CollapsiblePreferenceCard(
                 }
             }
             Spacer(Modifier.height(10.dp))
-            Text(
+            AuroraText(
                 if (selectedIds.isEmpty()) {
                     "尚未设置 · 更改后推荐列表会自动刷新"
                 } else {
                     "已选 ${selectedIds.size} $unitNoun · 更改后推荐列表会自动刷新"
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
             )
         } else {
             // ---- Collapsed: one-line summary of the current selection ----
             Spacer(Modifier.height(10.dp))
             val labels = options.filter { it.first in selectedIds }.map { it.second }
-            Text(
-                if (labels.isEmpty()) {
-                    "未设置 · 点此展开选择"
-                } else {
-                    val shown = labels.take(4).joinToString(" · ")
-                    val suffix = if (labels.size > 4) " 等 ${labels.size} 项" else ""
-                    "已选 ${labels.size} $unitNoun：$shown$suffix"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = if (labels.isEmpty()) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                } else {
-                    MaterialTheme.colorScheme.primary
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onToggleExpanded),
-            )
+            val summaryText = if (labels.isEmpty()) {
+                "未设置 · 点此展开选择"
+            } else {
+                val shown = labels.take(4).joinToString(" · ")
+                val suffix = if (labels.size > 4) " 等 ${labels.size} 项" else ""
+                "已选 ${labels.size} $unitNoun：$shown$suffix"
+            }
+            val summaryModifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onToggleExpanded)
+            if (labels.isEmpty()) {
+                Text(
+                    summaryText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = summaryModifier,
+                )
+            } else {
+                // The summary breathes with the aurora.
+                AuroraText(
+                    summaryText,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = summaryModifier,
+                )
+            }
         }
     }
 }
 
-/** Tappable preference pill: aurora gradient + check mark when selected. */
+/** Tappable preference pill: living aurora gradient + check mark when selected. */
 @Composable
 private fun PreferenceChip(
     label: String,
@@ -428,11 +445,13 @@ private fun PreferenceChip(
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(18.dp))
-            .background(
+            .then(
                 if (selected) {
-                    AppGradients.primaryBrush()
+                    Modifier.auroraFill(RoundedCornerShape(18.dp))
                 } else {
-                    SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                    Modifier.background(
+                        SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                    )
                 },
             )
             .clickable(onClick = onClick)

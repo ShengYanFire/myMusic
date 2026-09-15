@@ -16,6 +16,11 @@ android/assemble.log
 /gfxinfo.txt
 /library.pb.txt
 
+# Built binaries never belong in the repo (a 22 MB tracked APK bloats every
+# clone and every future commit's history)
+/*.apk
+/*.aab
+
 # Local scratch / reference-extract directories
 /.gradle-tmp/
 /nav-src/

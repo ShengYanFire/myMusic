@@ -1,5 +1,7 @@
 package com.mymusic.player.network
 
+import com.mymusic.player.domain.Track
+
 /**
  * DTOs parsed directly from Bilibili API responses.
  */
@@ -12,10 +14,37 @@ data class SearchItem(
     val play: Long? = null,
 )
 
-/** Only the fields the player actually needs (the cid for page 1). */
+/** Convert a search result into the playable [Track] domain model. */
+fun SearchItem.toTrack(): Track = Track(
+    bvid = bvid,
+    title = title,
+    cover = pic,
+    author = author,
+    duration = duration,
+)
+
+/**
+ * One 分P of a multi-P video (视频选集), from /x/web-interface/view's pages[]:
+ * each page has its own cid (audio stream + subtitles are per-page).
+ */
+data class BiliPage(
+    val cid: Long,
+    val page: Int,
+    /** Page title as shown in B站's 选集 list ("01 歌名"); may be blank. */
+    val part: String,
+    val duration: Int,
+)
+
+/**
+ * Fields of /x/web-interface/view the player needs: the cid for page 1, the
+ * video's 分P list (视频选集), plus — when the video belongs to an uploader
+ * 合集 (ugc_season) — every video of that collection in order. All ride
+ * along on the same /view request, so none of it costs an extra API call.
+ */
 data class VideoInfo(
-    val bvid: String,
     val cid: Long?,
+    val pages: List<BiliPage> = emptyList(),
+    val seasonEpisodes: List<SearchItem> = emptyList(),
 )
 
 data class AudioInfo(

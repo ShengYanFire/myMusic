@@ -7,7 +7,7 @@ import com.google.gson.JsonPrimitive
 import com.mymusic.player.data.AppSettings
 import com.mymusic.player.domain.LyricLine
 import com.mymusic.player.domain.Lyrics
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -21,12 +21,10 @@ import okhttp3.Request
  *  - searches LRCLIB (https://lrclib.net, free, no key) as a fallback when a
  *    video has no subtitles at all, which is the common case.
  */
-class LyricsClient(private val settings: AppSettings) {
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+class LyricsClient(
+    private val settings: AppSettings,
+    private val client: OkHttpClient,
+) {
 
     /**
      * Download a Bilibili subtitle JSON ([url] from [BiliSubtitle]) and parse
@@ -36,13 +34,18 @@ class LyricsClient(private val settings: AppSettings) {
         withContext(Dispatchers.IO) {
             val builder = Request.Builder()
                 .url(url)
-                .header("User-Agent", BiliDirectClient.UA)
-                .header("Referer", "https://www.bilibili.com/")
-            val cookie = settings.cookie.first()
-            if (cookie.isNotBlank()) {
-                builder.header("Cookie", cookie)
+                .header("User-Agent", BiliHeaders.DESKTOP_UA)
+                .header("Referer", BiliHeaders.REFERER)
+            // Never send the session token over a cleartext URL: the hdslb CDN
+            // list occasionally carries http:// entries, and an on-path
+            // attacker would otherwise capture the whole login.
+            if (url.startsWith("https")) {
+                val cookie = settings.cookie.first()
+                if (cookie.isNotBlank()) {
+                    builder.header("Cookie", cookie)
+                }
             }
-            client.newCall(builder.build()).execute().use { resp ->
+            client.awaitCall(builder.build()).use { resp ->
                 if (!resp.isSuccessful) throw RuntimeException("字幕下载失败（HTTP ${resp.code}）")
                 val text = resp.body?.string() ?: throw RuntimeException("字幕下载失败：空响应")
                 val obj = JsonParser.parseString(text).asJsonObject
@@ -51,7 +54,9 @@ class LyricsClient(private val settings: AppSettings) {
                 body.mapNotNull { el ->
                     if (!el.isJsonObject) return@mapNotNull null
                     val o = el.asJsonObject
-                    val content = o.get("content")?.asString?.trim().orEmpty()
+                    // JsonNull is NOT a Kotlin null — `?.asString` on it throws
+                    // (one null content field would abort the whole subtitle).
+                    val content = o.get("content").asStringOrNull()?.trim().orEmpty()
                     if (content.isEmpty()) return@mapNotNull null
                     val from = o.get("from").doubleOrNull() ?: 0.0
                     val to = o.get("to").doubleOrNull() ?: from
@@ -79,7 +84,15 @@ class LyricsClient(private val settings: AppSettings) {
             add(mapOf("track_name" to title))
         }
         for (params in attempts) {
-            val results = runCatching { lrcLibSearch(params) }.getOrDefault(emptyList())
+            // Cancellation-aware: a cancelled lookup must not keep running the
+            // remaining attempts.
+            val results = try {
+                lrcLibSearch(params)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyList()
+            }
             val best = pickBest(results, title, artist)
             if (best != null) return best
         }
@@ -89,14 +102,14 @@ class LyricsClient(private val settings: AppSettings) {
     private suspend fun lrcLibSearch(params: Map<String, String>): List<JsonObject> =
         withContext(Dispatchers.IO) {
             val query = params.entries.joinToString("&") { (k, v) ->
-                "${encodeURIComponent(k)}=${encodeURIComponent(v)}"
+                "${BiliDirectClient.encodeURIComponent(k)}=${BiliDirectClient.encodeURIComponent(v)}"
             }
             val request = Request.Builder()
                 .url("$LRCLIB_BASE/api/search?$query")
                 .header("User-Agent", LRCLIB_UA)
                 .header("Accept", "application/json")
                 .build()
-            client.newCall(request).execute().use { resp ->
+            client.awaitCall(request).use { resp ->
                 if (!resp.isSuccessful) return@withContext emptyList()
                 val text = resp.body?.string() ?: return@withContext emptyList()
                 val parsed = runCatching { JsonParser.parseString(text) }.getOrNull()
@@ -133,7 +146,7 @@ class LyricsClient(private val settings: AppSettings) {
                         normalizeForMatch(artistName).contains(normArtist)) 1 else 0)
             val score = (if (hasSynced) 4 else 0) + nameScore
             val lyrics = if (hasSynced) {
-                val lines = parseLrc(synced!!)
+                val lines = LyricsClient.parseLrc(synced!!)
                 if (lines.isEmpty()) {
                     // Timestamps existed but nothing parsed: fall back to plain.
                     plainLines(plain)
@@ -159,41 +172,6 @@ class LyricsClient(private val settings: AppSettings) {
             synced = false,
             source = "网络歌词（未同步）",
         )
-
-    /**
-     * Parse an LRC string ("[mm:ss.xx]line", possibly several timestamps per
-     * line, metadata tags like [ti:] ignored) into timed, sorted lines. The
-     * last line gets a generous 10 s end so it stays highlighted.
-     */
-    fun parseLrc(lrc: String): List<LyricLine> {
-        val out = mutableListOf<Pair<Long, String>>()
-        lrc.lines().forEach { raw ->
-            val line = raw.trim()
-            if (line.isEmpty()) return@forEach
-            val stamps = LRC_STAMP.findAll(line).toList()
-            if (stamps.isEmpty()) return@forEach
-            val text = line.substring(stamps.last().range.last + 1).trim()
-            if (text.isEmpty()) return@forEach
-            stamps.forEach { m ->
-                val min = m.groupValues[1].toLongOrNull() ?: return@forEach
-                val sec = m.groupValues[2].toLongOrNull() ?: return@forEach
-                val frac = m.groupValues[3]
-                val fracMs = when (frac.length) {
-                    0 -> 0L
-                    1 -> frac.toLongOrNull()?.times(100)
-                    2 -> frac.toLongOrNull()?.times(10)
-                    else -> frac.take(3).toLongOrNull()
-                } ?: 0L
-                val t = (min * 60 + sec) * 1000 + fracMs
-                out.add(t to text)
-            }
-        }
-        val sorted = out.sortedBy { it.first }
-        return sorted.mapIndexed { i, (t, text) ->
-            val end = sorted.getOrNull(i + 1)?.first ?: (t + 10_000)
-            LyricLine(startMs = t, endMs = end, text = text)
-        }
-    }
 
     companion object {
         private const val LRCLIB_BASE = "https://lrclib.net"
@@ -228,6 +206,42 @@ class LyricsClient(private val settings: AppSettings) {
         private val SEPARATORS = Regex("""[|/／\\|丨·~～—\-–_]+""")
 
         /**
+         * Parse an LRC string ("[mm:ss.xx]line", possibly several timestamps
+         * per line, metadata tags like [ti:] ignored) into timed, sorted
+         * lines. The last line gets a generous 10 s end so it stays
+         * highlighted.
+         */
+        fun parseLrc(lrc: String): List<LyricLine> {
+            val out = mutableListOf<Pair<Long, String>>()
+            lrc.lines().forEach { raw ->
+                val line = raw.trim()
+                if (line.isEmpty()) return@forEach
+                val stamps = LRC_STAMP.findAll(line).toList()
+                if (stamps.isEmpty()) return@forEach
+                val text = line.substring(stamps.last().range.last + 1).trim()
+                if (text.isEmpty()) return@forEach
+                stamps.forEach { m ->
+                    val min = m.groupValues[1].toLongOrNull() ?: return@forEach
+                    val sec = m.groupValues[2].toLongOrNull() ?: return@forEach
+                    val frac = m.groupValues[3]
+                    val fracMs = when (frac.length) {
+                        0 -> 0L
+                        1 -> frac.toLongOrNull()?.times(100)
+                        2 -> frac.toLongOrNull()?.times(10)
+                        else -> frac.take(3).toLongOrNull()
+                    } ?: 0L
+                    val t = (min * 60 + sec) * 1000 + fracMs
+                    out.add(t to text)
+                }
+            }
+            val sorted = out.sortedBy { it.first }
+            return sorted.mapIndexed { i, (t, text) ->
+                val end = sorted.getOrNull(i + 1)?.first ?: (t + 10_000)
+                LyricLine(startMs = t, endMs = end, text = text)
+            }
+        }
+
+        /**
          * Reduce a messy Bilibili title ("【初音未来】千本桜 MV 中文字幕") to a
          * plain song-name query ("初音未来 千本桜") for LRCLIB.
          */
@@ -242,11 +256,6 @@ class LyricsClient(private val settings: AppSettings) {
 
         private fun normalizeForMatch(s: String): String =
             s.lowercase().replace(Regex("""[\s\-–—·'’`]"""), "")
-
-        private fun encodeURIComponent(value: String): String {
-            val enc = java.net.URLEncoder.encode(value, "UTF-8")
-            return enc.replace("+", "%20").replace("%7E", "~")
-        }
     }
 
     // ---- small JSON helpers (independent of BiliDirectClient's privates) ----
