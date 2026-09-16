@@ -68,6 +68,11 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
 
+        // Route notification / lock-screen / Bluetooth skip actions through the
+        // app's own queue logic (shuffle + on-demand resolution) instead of the
+        // player's native linear timeline navigation.
+        val sessionPlayer = SessionNavigationPlayer(player)
+
         val sessionIntent = PendingIntent.getActivity(
             this,
             0,
@@ -75,7 +80,7 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setSessionActivity(sessionIntent)
             .build()
     }

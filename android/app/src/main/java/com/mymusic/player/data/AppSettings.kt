@@ -1,6 +1,7 @@
 package com.mymusic.player.data
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -24,6 +25,7 @@ class AppSettings(private val context: Context) {
     private val cookieKey = stringPreferencesKey("cookie")
     private val qualityKey = stringPreferencesKey("quality")
     private val repeatModeKey = intPreferencesKey("repeat_mode")
+    private val shuffleEnabledKey = booleanPreferencesKey("shuffle_enabled")
     private val favoriteGenresKey = stringSetPreferencesKey("favorite_genres")
     private val favoriteMoodsKey = stringSetPreferencesKey("favorite_moods")
 
@@ -76,6 +78,17 @@ class AppSettings(private val context: Context) {
     suspend fun setRepeatMode(mode: Int) {
         context.settingsDataStore.edit { prefs ->
             prefs[repeatModeKey] = mode.coerceIn(0, 2)
+        }
+    }
+
+    /** Shuffle playback: random order over the queue, remembered across restarts. */
+    val shuffleEnabled: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
+        prefs[shuffleEnabledKey] ?: false
+    }
+
+    suspend fun setShuffleEnabled(value: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[shuffleEnabledKey] = value
         }
     }
 

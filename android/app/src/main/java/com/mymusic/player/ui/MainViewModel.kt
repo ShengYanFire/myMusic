@@ -11,7 +11,6 @@ import com.mymusic.player.data.TrackRepository
 import com.mymusic.player.domain.LyricLine
 import com.mymusic.player.domain.Track
 import com.mymusic.player.network.SearchItem
-import com.mymusic.player.player.PlayerController
 import com.mymusic.player.util.runSuspendCatching
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -25,7 +24,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -35,9 +33,9 @@ import kotlinx.coroutines.launch
 /**
  * Shared [AndroidViewModel] for the whole app: search, recommendations,
  * library, lyrics and settings. The playback-queue pipeline (resolve cache,
- * in-flight dedup, queue-context decision, background fill) lives in its own
- * [PlaybackQueueCoordinator] — a plain class this ViewModel owns and forwards
- * the play requests to.
+ * in-flight dedup, queue-context decision, background fill) lives in a
+ * process-wide [PlaybackQueueCoordinator] the Application owns (so it keeps
+ * resolving in the background); this ViewModel forwards the play requests to it.
  */
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -46,6 +44,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo: TrackRepository = MyMusicApp.instance.trackRepo
     private val library: LibraryStore = MyMusicApp.instance.library
     private val settings = MyMusicApp.instance.settings
+    private val historyStore = MyMusicApp.instance.searchHistory
 
     // ---- Search ----
     val query = MutableStateFlow("")
@@ -59,6 +58,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var searchPage = 1
     /** Bumped on every new search so stale load-more results are discarded. */
     private var searchGeneration = 0
+
+    // ---- Search history ----
+    /** Keywords the user actually searched, most recent first. */
+    val searchHistory: StateFlow<List<String>> = historyStore.history
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    fun removeSearchHistory(term: String) {
+        viewModelScope.launch { historyStore.remove(term) }
+    }
+
+    fun clearSearchHistory() {
+        viewModelScope.launch { historyStore.clear() }
+    }
 
     // ---- Settings ----
     val quality: StateFlow<String> = settings.quality
@@ -188,11 +200,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun searchNow(keyword: String) {
-        if (keyword.isBlank()) return
-        query.value = keyword
+        val q = keyword.trim()
+        if (q.isEmpty()) return
+        query.value = q
         searchJob?.cancel()
         loadingMoreSearch.value = false
-        searchJob = viewModelScope.launch { doSearch(keyword.trim()) }
+        searchJob = viewModelScope.launch {
+            // An explicit submit (search button / IME action / a history-or-hot
+            // chip tap) is recorded immediately — the user clearly meant to
+            // search it, even if the request later fails. The as-you-type
+            // debounce path is deliberately NOT recorded (it would save words
+            // like "周" then "周杰" then "周杰伦"), matching SearchHistoryStore's
+            // contract.
+            historyStore.add(q)
+            doSearch(q)
+        }
     }
 
     fun clearSearch() {
@@ -294,12 +316,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Playback queue pipeline (delegated to the coordinator) ----
 
-    private val queue = PlaybackQueueCoordinator(
-        repo = repo,
-        scope = viewModelScope,
-        onMessage = ::showMessage,
-        shared = MyMusicApp.instance.audioCache,
-    )
+    private val queue = MyMusicApp.instance.queue
 
     /** uid of the track currently being resolved by [requestPlay] (row spinner). */
     val resolvingUid: StateFlow<String?> = queue.resolvingUid
@@ -318,35 +335,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         loadRecommendations()
-        // 下一首 on-demand: the player asks for entries it cannot play yet
-        // through the needResolveNext FLOW (no static callback a dead
-        // ViewModel could stay registered in), and the coordinator resolves
-        // and inserts them.
-        PlayerController.needResolveNext
-            .onEach { queue.onNeedResolveNext(it) }
-            .launchIn(viewModelScope)
-        // 播单记忆上次进度: restore the last session's queue / song / position
-        // (shown paused), and route a play tap on the not-yet-resolved restored
-        // session back through the coordinator so it re-resolves and resumes.
-        viewModelScope.launch {
-            val saved = runSuspendCatching {
-                MyMusicApp.instance.playbackProgress.state.first()
-            }.getOrNull()
-            if (saved != null) PlayerController.restoreProgress(saved)
-        }
-        PlayerController.needResume
-            .onEach {
-                val s = PlayerController.state.value
-                val tracks = s.queue
-                if (tracks.isEmpty()) return@onEach
-                queue.requestPlay(
-                    tracks = tracks,
-                    index = s.queueIndex.coerceAtLeast(0).coerceAtMost(tracks.lastIndex),
-                    useListAsQueue = true,
-                    onOpened = {},
-                    startPositionMs = PlayerController.positionMs.value.coerceAtLeast(0L),
-                )
-            }
+        // Playback-pipeline messages (解析音源中… / 连播合集… / 解析失败…) now
+        // come from the process-wide coordinator (MyMusicApp.queue) — bridge its
+        // shared bus into this ViewModel's snackbar Channel while the UI lives.
+        MyMusicApp.instance.uiMessages
+            .onEach { _message.trySend(it) }
             .launchIn(viewModelScope)
         // Re-personalize the feed whenever the genre/mood selection changes.
         // The first emission is just the persisted value loaded at startup —

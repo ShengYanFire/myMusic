@@ -9,14 +9,24 @@ import com.mymusic.player.data.AudioResolutionCache
 import com.mymusic.player.data.LibraryStore
 import com.mymusic.player.data.LyricsRepository
 import com.mymusic.player.data.PlaybackProgressStore
+import com.mymusic.player.data.SearchHistoryStore
 import com.mymusic.player.data.TrackRepository
 import com.mymusic.player.network.BiliDirectClient
 import com.mymusic.player.network.BiliHeaders
 import com.mymusic.player.network.LyricsClient
 import com.mymusic.player.player.PlayerController
+import com.mymusic.player.ui.PlaybackQueueCoordinator
+import com.mymusic.player.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -39,6 +49,8 @@ class MyMusicApp : Application(), ImageLoaderFactory {
         private set
     lateinit var playbackProgress: PlaybackProgressStore
         private set
+    lateinit var searchHistory: SearchHistoryStore
+        private set
 
     /** Single shared repository instances (stateless) for the whole app. */
     lateinit var trackRepo: TrackRepository
@@ -53,6 +65,23 @@ class MyMusicApp : Application(), ImageLoaderFactory {
      */
     lateinit var audioCache: AudioResolutionCache
         private set
+
+    /**
+     * Process-wide CoroutineScope for the playback pipeline (background queue
+     * fill + 下一首/续播 subscriptions) — it must outlive any single Activity so
+     * lock-screen / background playback keeps resolving while the UI is gone (a
+     * ViewModel-scoped scope died with the Activity and stalled it).
+     */
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    /** Single shared playback-queue coordinator (created once in [onCreate]). */
+    lateinit var queue: PlaybackQueueCoordinator
+        private set
+
+    /** Snackbar messages from the process-wide queue pipeline, bridged into the
+     *  ViewModel's Channel by whichever UI screen is alive. */
+    private val _uiMessages = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val uiMessages: SharedFlow<String> = _uiMessages.asSharedFlow()
 
     /**
      * One shared OkHttpClient for the API + lyrics paths (one connection
@@ -83,13 +112,49 @@ class MyMusicApp : Application(), ImageLoaderFactory {
         api = BiliDirectClient(settings, httpClient)
         library = LibraryStore(this)
         playbackProgress = PlaybackProgressStore(this)
+        searchHistory = SearchHistoryStore(this)
         trackRepo = TrackRepository(api, settings)
         lyricsRepo = LyricsRepository(api, LyricsClient(settings, httpClient))
         audioCache = AudioResolutionCache(
             resolveFast = trackRepo::resolveAudioFast,
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
+            scope = appScope,
+        )
+        queue = PlaybackQueueCoordinator(
+            repo = trackRepo,
+            scope = appScope,
+            onMessage = { _uiMessages.tryEmit(it) },
+            shared = audioCache,
         )
         PlayerController.init(this)
+
+        // 播单记忆上次进度: restore the last session's queue / song / position
+        // (shown paused). Process-wide, not tied to any Activity.
+        appScope.launch {
+            val saved = runSuspendCatching { playbackProgress.state.first() }.getOrNull()
+            if (saved != null) PlayerController.restoreProgress(saved)
+        }
+        // 下一首 on-demand: resolve-and-insert entries the player asks for but
+        // cannot play yet. Subscribed on the PROCESS scope (not a ViewModel), so
+        // lock-screen / background 下一首 keeps working after the Activity is gone.
+        PlayerController.needResolveNext
+            .onEach { queue.onNeedResolveNext(it) }
+            .launchIn(appScope)
+        // 续播 a restored session whose timeline is still empty (a play tap on a
+        // not-yet-re-resolved restored queue) — also process-scoped.
+        PlayerController.needResume
+            .onEach {
+                val s = PlayerController.state.value
+                val tracks = s.queue
+                if (tracks.isEmpty()) return@onEach
+                queue.requestPlay(
+                    tracks = tracks,
+                    index = s.queueIndex.coerceAtLeast(0).coerceAtMost(tracks.lastIndex),
+                    useListAsQueue = true,
+                    onOpened = {},
+                    startPositionMs = PlayerController.positionMs.value.coerceAtLeast(0L),
+                )
+            }
+            .launchIn(appScope)
     }
 
     override fun newImageLoader(): ImageLoader = imageLoader

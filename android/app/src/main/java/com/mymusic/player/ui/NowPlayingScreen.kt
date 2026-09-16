@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Timer
@@ -98,6 +99,7 @@ fun NowPlayingScreen(
     val state by PlayerController.state.collectAsState()
     val current = state.current
     val repeatMode by PlayerController.repeatMode.collectAsState()
+    val shuffleEnabled by PlayerController.shuffleEnabled.collectAsState()
     val sleepRemaining by PlayerController.sleepRemainingMs.collectAsState()
     val favorites by vm.favorites.collectAsState()
     val playlists by vm.playlists.collectAsState()
@@ -165,19 +167,24 @@ fun NowPlayingScreen(
         // Synchronous queue-bounds check: list cycling wraps around, so only
         // a sequential run at the last/first entry is really "the end"; an
         // on-demand 下一首 resolution in progress means the switch IS coming.
+        // Under shuffle the logical index says nothing about the end of the
+        // random round, so this fast path is skipped and the async fallback
+        // (which observes whether the track actually changed) alone decides.
         val q = state.queue
         val idx = state.queueIndex
         val wraps = repeatMode == Player.REPEAT_MODE_ALL
         val resolvingNext = state.loadingNextUid != null
-        if (goNext) {
-            if (!wraps && !resolvingNext && q.isNotEmpty() && idx >= q.lastIndex) {
-                announce("已经是最后一首了")
-            }
-        } else {
-            // playPrevious restarts the current song once it is a few seconds
-            // in — that is not "no previous".
-            if (idx <= 0 && beforePosMs <= 3_000) {
-                announce("已经是第一首了")
+        if (!shuffleEnabled) {
+            if (goNext) {
+                if (!wraps && !resolvingNext && q.isNotEmpty() && idx >= q.lastIndex) {
+                    announce("已经是最后一首了")
+                }
+            } else {
+                // playPrevious restarts the current song once it is a few seconds
+                // in — that is not "no previous".
+                if (idx <= 0 && beforePosMs <= 3_000) {
+                    announce("已经是第一首了")
+                }
             }
         }
         scope.launch {
@@ -186,7 +193,13 @@ fun NowPlayingScreen(
             val stayed = now.current?.uid == beforeUid
             val stillResolving = now.loadingNextUid != null
             if (stayed && !stillResolving && !(!goNext && beforePosMs > 3_000)) {
-                announce(if (goNext) "已经是最后一首了" else "已经是第一首了")
+                announce(
+                    if (goNext) {
+                        if (shuffleEnabled) "这一轮随机播放已播完" else "已经是最后一首了"
+                    } else {
+                        if (shuffleEnabled) "已经回到随机播放的起点" else "已经是第一首了"
+                    },
+                )
             }
         }
     }
@@ -355,41 +368,55 @@ fun NowPlayingScreen(
 
                 Spacer(Modifier.height(22.dp))
 
-                // ---- Repeat / sleep row ----
+                // ---- Shuffle / repeat (left) · sleep (right) row ----
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    GlassIconButton(
-                        onClick = { PlayerController.cycleRepeatMode() },
-                        icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
-                            Icons.Filled.RepeatOne
-                        } else {
-                            Icons.Filled.Repeat
-                        },
-                        contentDescription = when (repeatMode) {
-                            Player.REPEAT_MODE_ONE -> "单曲循环"
-                            Player.REPEAT_MODE_ALL -> "列表循环"
-                            else -> "顺序播放"
-                        },
-                        tint = White40,
-                        accent = repeatMode > 0,
-                    )
-                    sleepRemaining?.let {
-                        Text(
-                            "定时 ${formatMs(it)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = White70,
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        GlassIconButton(
+                            onClick = { PlayerController.toggleShuffle() },
+                            icon = Icons.Filled.Shuffle,
+                            contentDescription = if (shuffleEnabled) "关闭随机播放" else "随机播放",
+                            tint = White40,
+                            accent = shuffleEnabled,
+                        )
+                        GlassIconButton(
+                            onClick = { PlayerController.cycleRepeatMode() },
+                            icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
+                                Icons.Filled.RepeatOne
+                            } else {
+                                Icons.Filled.Repeat
+                            },
+                            contentDescription = when (repeatMode) {
+                                Player.REPEAT_MODE_ONE -> "单曲循环"
+                                Player.REPEAT_MODE_ALL -> "列表循环"
+                                else -> "顺序播放"
+                            },
+                            tint = White40,
+                            accent = repeatMode > 0,
                         )
                     }
-                    GlassIconButton(
-                        onClick = { showSleepDialog = true },
-                        icon = Icons.Filled.Timer,
-                        contentDescription = "定时停止播放",
-                        tint = White40,
-                        accent = sleepRemaining != null,
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        sleepRemaining?.let {
+                            Text(
+                                "定时 ${formatMs(it)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = White70,
+                            )
+                        }
+                        GlassIconButton(
+                            onClick = { showSleepDialog = true },
+                            icon = Icons.Filled.Timer,
+                            contentDescription = "定时停止播放",
+                            tint = White40,
+                            accent = sleepRemaining != null,
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(18.dp))

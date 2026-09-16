@@ -8,6 +8,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -99,6 +102,7 @@ fun SearchScreen(
     val favoriteMoods by vm.favoriteMoods.collectAsState()
     val recommendGeneration by vm.recommendGeneration.collectAsState()
     val resolvingUid by vm.resolvingUid.collectAsState()
+    val searchHistory by vm.searchHistory.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
 
@@ -216,8 +220,19 @@ fun SearchScreen(
                     }
                 }
 
-                // Empty query → recommendation feed (loads more at the bottom).
+                // Empty query → recommendation feed (loads more at the bottom), with
+                // the search history section shown above it once any exists.
                 query.isBlank() -> {
+                    if (searchHistory.isNotEmpty()) {
+                        item(key = "search-history") {
+                            SearchHistorySection(
+                                history = searchHistory,
+                                onPick = { vm.searchNow(it) },
+                                onRemove = vm::removeSearchHistory,
+                                onClear = vm::clearSearchHistory,
+                            )
+                        }
+                    }
                     when {
                         loadingRecommendations && recommendations.isEmpty() -> {
                             item(key = "rec-loading") {
@@ -452,6 +467,84 @@ private fun StickySearchBar(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { onSearch() }),
         )
+    }
+}
+
+/**
+ * 搜索历史 section shown above the recommendation feed while the search box is
+ * EMPTY (once any history exists): tap a chip to re-search, tap the × to drop
+ * just that one entry, or 清空 to clear all.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SearchHistorySection(
+    history: List<String>,
+    onPick: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "搜索历史",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onClear) { Text("清空") }
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            history.forEach { term ->
+                HistoryChip(
+                    term = term,
+                    onPick = { onPick(term) },
+                    onRemove = { onRemove(term) },
+                )
+            }
+        }
+    }
+}
+
+/** History chip: tap the label to re-search, tap the × to drop just this entry. */
+@Composable
+private fun HistoryChip(term: String, onPick: () -> Unit, onRemove: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
+            .clickable(onClick = onPick)
+            .padding(start = 12.dp, top = 5.dp, bottom = 5.dp, end = 2.dp),
+    ) {
+        Text(
+            term,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 180.dp),
+        )
+        IconButton(
+            onClick = onRemove,
+            modifier = Modifier.size(26.dp),
+        ) {
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "删除这条记录",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+        }
     }
 }
 

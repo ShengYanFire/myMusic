@@ -157,6 +157,33 @@ object PlayerController {
     private val _repeatMode = MutableStateFlow(Player.REPEAT_MODE_OFF)
     val repeatMode: StateFlow<Int> = _repeatMode.asStateFlow()
 
+    private val _shuffleEnabled = MutableStateFlow(false)
+    val shuffleEnabled: StateFlow<Boolean> = _shuffleEnabled.asStateFlow()
+
+    /**
+     * Shuffle round over the LOGICAL queue (indices into [PlayerUiState.queue],
+     * which is stable for the lifetime of a [playQueue] session — the background
+     * fill only resolves entries in place, never reorders or resizes it).
+     *
+     * The two deques form one ordered walk: `shuffleHistory (old → new) ‖ current
+     * ‖ shuffleUpcoming (front = next)`. 下一首 pops from the front of upcoming
+     * and pushes the current index onto the back of history; 上一首 pops the back
+     * of history and pushes the current index onto the FRONT of upcoming — the
+     * symmetric undo, so forward/back never lose a song. A fresh round is built
+     * when the queue starts (or shuffle is turned on) and reshuffled from scratch
+     * once exhausted under 列表循环.
+     */
+    private val shuffleUpcoming = ArrayDeque<Int>()
+    private val shuffleHistory = ArrayDeque<Int>()
+    /**
+     * The queue index the shuffle walk currently treats as "current". Updated
+     * only by the walk itself (draw / undo) and by (re)seeding; compared
+     * against [PlayerUiState.queueIndex] in [reconcileShuffleAfterTransition]
+     * to detect external jumps (queue-list tap, error skip) that must rebuild
+     * the round. -1 = no round built yet.
+     */
+    private var shuffleAnchorIndex = -1
+
     private val _sleepRemainingMs = MutableStateFlow<Long?>(null)
     val sleepRemainingMs: StateFlow<Long?> = _sleepRemainingMs.asStateFlow()
 
@@ -290,6 +317,7 @@ object PlayerController {
                 loadingNextUid = null,
             )
             syncFromPlayer()
+            reconcileShuffleAfterTransition(reason)
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -334,11 +362,14 @@ object PlayerController {
             controller = c
             c.addListener(listener)
             syncFromPlayer()
-            // Restore the persisted repeat mode on the (re)created player.
+            // Restore the persisted repeat mode + shuffle toggle on the
+            // (re)created player; a shuffle round is (re)built lazily from the
+            // current queue on first use if none exists yet.
             scope.launch {
                 val saved = MyMusicApp.instance.settings.repeatMode.first()
                 c.repeatMode = saved
                 _repeatMode.value = saved
+                _shuffleEnabled.value = MyMusicApp.instance.settings.shuffleEnabled.first()
             }
             pendingQueue?.let { q ->
                 pendingQueue = null
@@ -494,6 +525,8 @@ object PlayerController {
             error = null,
         )
         _positionMs.value = resumeAt
+        // A new queue starts a fresh shuffle round (seeded only when on).
+        resetShuffleRound()
         scheduleProgressSave()
     }
 
@@ -530,6 +563,10 @@ object PlayerController {
         val c = controller ?: return
         val count = c.mediaItemCount
         if (count == 0) return
+        if (_shuffleEnabled.value) {
+            playNextShuffled(c)
+            return
+        }
         val cur = c.currentMediaItemIndex
         val next = cur + 1
         when {
@@ -566,11 +603,8 @@ object PlayerController {
     }
 
     /**
-     * 下一首 to an entry that has not reached the player yet. If it is already
-     * in the timeline (the background fill beat us to it) a plain seek — same
-     * semantics as the healthy path, a paused player stays paused — is all it
-     * takes; otherwise publish the loading hint and ask the UI layer to
-     * resolve-and-insert it on demand.
+     * 下一首 to an entry that has not reached the player yet. Computes the
+     * linear next entry (wrap under 列表循环) and hands it to [requestResolveOnDemand].
      */
     private fun requestNextOnDemand(c: MediaController) {
         val q = _state.value.queue
@@ -581,21 +615,33 @@ object PlayerController {
             c.repeatMode == Player.REPEAT_MODE_ALL && q.size > 1 -> q[0]
             else -> return
         }
+        requestResolveOnDemand(c, next)
+    }
+
+    /**
+     * Play [target] even though it may not have reached the player timeline yet.
+     * If it is already there (the background fill beat us to it) a plain seek —
+     * same semantics as the healthy path, a paused player stays paused — is all
+     * it takes; otherwise publish a 正在解析 hint and ask the UI layer to
+     * resolve-and-insert it on demand. Shared by the linear 下一首 wrap, the
+     * shuffle draw, and the shuffle history rollback (上一首 under shuffle).
+     */
+    private fun requestResolveOnDemand(c: MediaController, target: Track) {
         val currentUid = _state.value.current?.uid
-        if (next.uid == currentUid) return
+        if (target.uid == currentUid) return
         // Already in the player timeline (the background fill beat us to it):
         // a plain seek is instant, mirroring the healthy-path seekAndPlay.
         for (j in 0 until c.mediaItemCount) {
-            if (c.getMediaItemAt(j).mediaId == next.uid) {
+            if (c.getMediaItemAt(j).mediaId == target.uid) {
                 seekAndPlay(c, j)
                 return
             }
         }
         // Already being resolved on demand from a previous tap — don't fire a
         // second Bilibili resolution for the same entry.
-        if (_state.value.loadingNextUid == next.uid) return
-        _state.value = _state.value.copy(loadingNextUid = next.uid)
-        if (!_needResolveNext.tryEmit(next)) {
+        if (_state.value.loadingNextUid == target.uid) return
+        _state.value = _state.value.copy(loadingNextUid = target.uid)
+        if (!_needResolveNext.tryEmit(target)) {
             // Buffer full (a slow subscriber): drop the hint, it would show a
             // "解析中" state nothing is working on otherwise.
             _state.value = _state.value.copy(loadingNextUid = null)
@@ -611,15 +657,147 @@ object PlayerController {
         val c = controller ?: return
         val count = c.mediaItemCount
         if (count == 0) return
+        if (_shuffleEnabled.value) {
+            playPreviousShuffled(c)
+            return
+        }
         val cur = c.currentMediaItemIndex
-        // Half the (known) duration for very short tracks so 上一首 still works.
-        val restartThresholdMs = if (c.duration > 0) minOf(3_000L, c.duration / 2) else 3_000L
         when {
-            c.currentPosition > restartThresholdMs -> seekAndPlay(c, cur, 0L)
+            c.currentPosition > restartThresholdMs(c) -> seekAndPlay(c, cur, 0L)
             cur > 0 -> seekAndPlay(c, cur - 1)
             c.repeatMode == Player.REPEAT_MODE_ALL && count > 1 -> seekAndPlay(c, count - 1)
             // First song of the queue with repeat off / one: restart it.
             else -> seekAndPlay(c, cur, 0L)
+        }
+    }
+
+    /**
+     * 下一首 under shuffle: draw the next random queue entry from the upcoming
+     * deck (reshuffling all-but-current once the round runs dry under 列表循环),
+     * then play it — a pure seek when it is already resolved, otherwise the same
+     * [requestResolveOnDemand] path (resolve-and-insert) the linear 下一首 uses.
+     * Returns true once a next entry was drawn and handed off (false = nothing
+     * to play: single-track queue, or the round is exhausted under 顺序播放).
+     */
+    private fun playNextShuffled(c: MediaController): Boolean {
+        val q = _state.value.queue
+        if (q.size <= 1) return false
+        ensureShuffleSeeded(q)
+        val next = drawShuffleNext(c, q) ?: return false
+        if (next == shuffleAnchorIndex) return false
+        if (shuffleAnchorIndex >= 0) shuffleHistory.addLast(shuffleAnchorIndex)
+        shuffleAnchorIndex = next
+        requestResolveOnDemand(c, q[next])
+        return true
+    }
+
+    /**
+     * 上一首 under shuffle: both deques mirror the forward walk, so this is the
+     * symmetric undo — pop the most recent history entry and put the current
+     * song back at the FRONT of the upcoming deck. Standard 上一首 semantics
+     * still apply first: a song that has played a few seconds just restarts.
+     */
+    private fun playPreviousShuffled(c: MediaController) {
+        val q = _state.value.queue
+        if (q.size <= 1) return
+        ensureShuffleSeeded(q)
+        // Restart either because the song is a few seconds in, or because the
+        // round has no history left behind it (nothing to go back to).
+        if (c.currentPosition > restartThresholdMs(c) || shuffleHistory.isEmpty()) {
+            seekAndPlay(c, c.currentMediaItemIndex, 0L)
+            return
+        }
+        val prev = shuffleHistory.removeLast()
+        if (shuffleAnchorIndex >= 0) shuffleUpcoming.addFirst(shuffleAnchorIndex)
+        shuffleAnchorIndex = prev
+        requestResolveOnDemand(c, q[prev])
+    }
+
+    /** Position past which 上一首 restarts the current song instead of going
+     *  back: media3 uses 3 s, halved for very short tracks so it still works. */
+    private fun restartThresholdMs(c: MediaController): Long =
+        if (c.duration > 0) minOf(3_000L, c.duration / 2) else 3_000L
+
+    /**
+     * Seed the shuffle deck once for the current queue when no round exists yet
+     * (e.g. a session restored from 播单记忆 on startup, where [playQueue] never
+     * ran and thus never built one). No-op once a round is already in motion
+     * (anchor set) or the queue has no meaningful current index.
+     */
+    private fun ensureShuffleSeeded(q: List<Track>) {
+        if (shuffleUpcoming.isEmpty() && shuffleHistory.isEmpty() && shuffleAnchorIndex < 0) {
+            seedShuffleRound(q, _state.value.queueIndex)
+        }
+    }
+
+    /**
+     * Drop the current shuffle round, then seed a fresh one over the whole
+     * queue (every entry except the one playing now) when shuffle is on. Used
+     * when a new queue starts ([playQueue]) and whenever the toggle flips.
+     */
+    private fun resetShuffleRound() {
+        if (_shuffleEnabled.value) {
+            seedShuffleRound(_state.value.queue, _state.value.queueIndex)
+        } else {
+            shuffleUpcoming.clear()
+            shuffleHistory.clear()
+            shuffleAnchorIndex = -1
+        }
+    }
+
+    /**
+     * (Re)build the shuffle round around [aroundIdx]: the deck becomes every
+     * queue entry except the one playing now, history is emptied, and the
+     * walk's anchor is set to [aroundIdx]. Callers guard on shuffle being on.
+     */
+    private fun seedShuffleRound(q: List<Track>, aroundIdx: Int) {
+        shuffleUpcoming.clear()
+        shuffleHistory.clear()
+        shuffleAnchorIndex = aroundIdx
+        if (aroundIdx >= 0 && q.size > 1) {
+            shuffleUpcoming.addAll(q.indices.filter { it != aroundIdx }.shuffled())
+        }
+    }
+
+    /**
+     * Draw the next shuffle index without mutating the walk's history/anchor
+     * (the caller commits them). Rewraps into a fresh all-but-current deck once
+     * the upcoming deck runs dry under 列表循环; returns null when the round is
+     * genuinely exhausted (顺序播放 / 单曲循环).
+     */
+    private fun drawShuffleNext(c: MediaController, q: List<Track>): Int? {
+        var next = shuffleUpcoming.removeFirstOrNull()
+        if (next == null && c.repeatMode == Player.REPEAT_MODE_ALL) {
+            shuffleUpcoming.addAll(q.indices.filter { it != shuffleAnchorIndex }.shuffled())
+            next = shuffleUpcoming.removeFirstOrNull()
+        }
+        return next
+    }
+
+    /**
+     * Keep the app-side shuffle walk in step with the player after a media-item
+     * transition, so 连播 / 跳歌 all honour the random order:
+     *  - AUTO (a song finished and ExoPlayer auto-advanced to the linear next):
+     *    redraw so background / lock-screen playback keeps the random order;
+     *    when the round is spent under 顺序播放, stop the player instead of
+     *    letting it fall through to linear replay of already-heard songs.
+     *  - SEEK / other where the player landed on a different logical index than
+     *    the walk's anchor (queue-list tap, error skip): rebuild the round
+     *    around that new index.
+     *  - otherwise (the walk's own seek already committed the anchor): nothing.
+     */
+    private fun reconcileShuffleAfterTransition(reason: Int) {
+        if (!_shuffleEnabled.value) return
+        val c = controller ?: return
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+            if (!playNextShuffled(c) && c.repeatMode != Player.REPEAT_MODE_ALL) {
+                c.pause()
+            }
+            return
+        }
+        val newQi = _state.value.queueIndex
+        if (newQi >= 0 && newQi != shuffleAnchorIndex) {
+            seedShuffleRound(_state.value.queue, newQi)
         }
     }
 
@@ -731,6 +909,40 @@ object PlayerController {
     /** Drop the "正在解析下一首…" hint (resolution finished or failed). */
     fun clearLoadingNext() {
         _state.value = _state.value.copy(loadingNextUid = null)
+        // The on-demand resolve failed / was abandoned: if the shuffle walk had
+        // optimistically advanced toward it, rebuild the round around the song
+        // actually playing now — the confirming transition never happened, so
+        // without this the walk drifts (phantom history / anchor) after a failed
+        // resolution.
+        if (_shuffleEnabled.value) {
+            seedShuffleRound(_state.value.queue, _state.value.queueIndex)
+        }
+    }
+
+    /**
+     * Whether the LOGICAL queue (or the shuffle round) still has something
+     * after / before the current song — used by [SessionNavigationPlayer] to
+     * keep the notification / lock-screen 下一首·上一首 enabled even when the
+     * player timeline itself has not been filled that far yet.
+     */
+    fun hasNextInQueue(): Boolean {
+        val q = _state.value.queue
+        if (q.isEmpty()) return false
+        if (_shuffleEnabled.value) {
+            return shuffleUpcoming.isNotEmpty() || _repeatMode.value == Player.REPEAT_MODE_ALL
+        }
+        val qi = _state.value.queueIndex
+        return qi >= 0 && qi + 1 < q.size
+    }
+
+    fun hasPreviousInQueue(): Boolean {
+        val q = _state.value.queue
+        if (q.isEmpty()) return false
+        if (_shuffleEnabled.value) {
+            return shuffleHistory.isNotEmpty()
+        }
+        val qi = _state.value.queueIndex
+        return qi > 0
     }
 
     /**
@@ -821,6 +1033,15 @@ object PlayerController {
         c.repeatMode = next
         _repeatMode.value = next
         scope.launch { MyMusicApp.instance.settings.setRepeatMode(next) }
+    }
+
+    /** Toggle shuffle; turning it on starts a fresh random round over the queue. */
+    fun toggleShuffle() {
+        val next = !_shuffleEnabled.value
+        _shuffleEnabled.value = next
+        // On: seed a fresh round. Off: just drop the walk on the floor.
+        resetShuffleRound()
+        scope.launch { MyMusicApp.instance.settings.setShuffleEnabled(next) }
     }
 
     /** Set a sleep timer in minutes (<=0 cancels). When it fires, playback stops and the app exits. */
