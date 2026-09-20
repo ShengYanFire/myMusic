@@ -68,3 +68,13 @@ data class BiliSubtitle(
     /** 0 = human subtitles, non-zero = AI-generated. */
     val aiType: Int,
 )
+
+/**
+ * A B站 risk-control / rate-limit rejection, or the app's own cooldown
+ * short-circuit. Retrying immediately is pointless and only extends the block,
+ * so resolution callers treat this as "fail fast — do NOT fall back to the
+ * full `/view + playurl` round trip". [code] is set for real API rejections
+ * (-412/-509) and null for the synthetic cooldown message.
+ */
+class BiliRiskControlException(message: String, val code: Int? = null) :
+    RuntimeException(message)

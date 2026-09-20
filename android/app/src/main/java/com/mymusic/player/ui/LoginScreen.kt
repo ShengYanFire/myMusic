@@ -70,11 +70,13 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.mymusic.player.network.BiliIdentity
 import com.mymusic.player.ui.theme.AppGradients
 import com.mymusic.player.ui.theme.LocalAuroraColorPhase
 import com.mymusic.player.ui.theme.White70
 import com.mymusic.player.ui.theme.auroraBrushAt
 import com.mymusic.player.ui.theme.auroraFill
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -105,6 +107,10 @@ fun LoginScreen(
     var loadFailed by remember { mutableStateOf(false) }
     var success by remember { mutableStateOf(false) }
     var finished by remember { mutableStateOf(false) }
+    // Turns true once OUR buvid3 is seeded into the WebView cookie jar; the
+    // WebView stays un-created until then so the login carries the app's
+    // device fingerprint instead of a throwaway per-WebView one.
+    var seeded by remember { mutableStateOf(false) }
     // Bumped to recreate the WebView when the user retries after a failure.
     var retryCount by remember { mutableIntStateOf(0) }
 
@@ -114,18 +120,16 @@ fun LoginScreen(
         if (!cookie.isNullOrEmpty() && cookie.contains("SESSDATA=")) {
             finished = true
             success = true
-            // Persist ONLY the SESSDATA token — the minimum the API needs.
-            // The full jar (bili_jct CSRF token etc.) must not be written to
-            // disk: it enables write actions and is a password-equivalent
-            // credential sitting in plaintext DataStore otherwise.
-            val sessdata = cookie
-                .split(";")
-                .firstOrNull { it.trim().startsWith("SESSDATA=") }
-                ?.trim()
+            // Persist the COMPLETE login identity (SESSDATA + DedeUserID +
+            // DedeUserID__ckMd5 + bili_jct). A consistent device+login pair is
+            // what B站 risk control reads as a normal browser. Volatile
+            // WebView-session cookies are dropped by the whitelist, and the
+            // device fingerprint (buvid3) is maintained separately in settings.
+            val identity = BiliIdentity.loginIdentityCookies(cookie)
             scope.launch {
-                if (sessdata != null) vm.saveCookie(sessdata)
-                // Drop the rest of the WebView cookie jar: the session token
-                // is safely in settings, the web login page is done.
+                if (identity.isNotBlank()) vm.saveCookie(identity)
+                // Drop the WebView cookie jar: the login identity is safely in
+                // settings, the web login page is done.
                 runCatching {
                     CookieManager.getInstance().removeAllCookies(null)
                     CookieManager.getInstance().flush()
@@ -138,8 +142,27 @@ fun LoginScreen(
         }
     }
 
-    // Poll cookies until the login flow completes (it redirects to bilibili.com).
+    // Seed OUR buvid3 into the WebView cookie jar FIRST, then poll cookies until
+    // the login flow completes (it redirects to bilibili.com). Seeding here —
+    // on every login attempt — covers both the first login and re-logins, and
+    // makes B站 mint SESSDATA against the same device fingerprint our API
+    // requests send, instead of the WebView's throwaway per-session one.
     LaunchedEffect(Unit) {
+        try {
+            val buvid3 = vm.ensureBuvid3()
+            if (buvid3.isNotBlank()) {
+                CookieManager.getInstance().setCookie(
+                    COOKIE_DOMAIN, "${BiliIdentity.BUVID3}=$buvid3",
+                )
+                CookieManager.getInstance().flush()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Best-effort: the login still works without a pre-seeded buvid3,
+            // and our API requests (re)generate it lazily on first use.
+        }
+        seeded = true
         while (!finished) {
             delay(800)
             harvestAndFinish()
@@ -226,7 +249,10 @@ fun LoginScreen(
                             RoundedCornerShape(24.dp),
                         ),
                 ) {
-                    key(retryCount) {
+                    // Recreate the WebView once OUR buvid3 is seeded (and on
+                    // retry): the passport page must load with the app's device
+                    // fingerprint already in its cookie jar.
+                    key(seeded, retryCount) {
                         AndroidView(
                             factory = { ctx ->
                                 WebView(ctx).apply {
@@ -276,7 +302,7 @@ fun LoginScreen(
                                             }
                                         }
                                     }
-                                    loadUrl(LOGIN_URL)
+                                    if (seeded) loadUrl(LOGIN_URL)
                                 }
                             },
                             update = { webView = it },

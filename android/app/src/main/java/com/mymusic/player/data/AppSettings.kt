@@ -9,8 +9,12 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.mymusic.player.domain.MusicGenres
 import com.mymusic.player.domain.MusicMoods
+import com.mymusic.player.network.BiliIdentity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 private val Context.settingsDataStore by preferencesDataStore(name = "settings")
 
@@ -23,6 +27,7 @@ private val Context.settingsDataStore by preferencesDataStore(name = "settings")
 class AppSettings(private val context: Context) {
 
     private val cookieKey = stringPreferencesKey("cookie")
+    private val buvid3Key = stringPreferencesKey("buvid3")
     private val qualityKey = stringPreferencesKey("quality")
     private val repeatModeKey = intPreferencesKey("repeat_mode")
     private val shuffleEnabledKey = booleanPreferencesKey("shuffle_enabled")
@@ -42,6 +47,55 @@ class AppSettings(private val context: Context) {
         context.settingsDataStore.edit { prefs ->
             prefs[cookieKey] = value.trim()
         }
+    }
+
+    /** Clear the saved login cookie (退出登录). */
+    suspend fun clearCookie() {
+        context.settingsDataStore.edit { prefs ->
+            prefs.remove(cookieKey)
+        }
+    }
+
+    // ---- Device fingerprint (buvid3) ----
+
+    /**
+     * The anonymous per-install device fingerprint B站 uses for risk control.
+     * Stable across launches, logins and logouts; generated once and never
+     * cleared by 退出登录 (it identifies the device, not the account).
+     */
+    val buvid3: Flow<String> = context.settingsDataStore.data.map { prefs ->
+        prefs[buvid3Key] ?: ""
+    }
+
+    private val buvidMutex = Mutex()
+
+    /** In-process copy (hot path); the persisted DataStore value stays authoritative. */
+    @Volatile
+    private var cachedBuvid3: String? = null
+
+    /**
+     * Return the per-install buvid3, generating + persisting it on first use.
+     * This runs on every api.bilibili.com request, so the result is cached in
+     * [cachedBuvid3] (safe publication via @Volatile) — after the first call
+     * it returns without taking the mutex or touching DataStore. The mutex
+     * makes concurrent first-callers share one value (idempotent): no
+     * duplicate fingerprints, no lost write.
+     */
+    suspend fun ensureBuvid3(): String {
+        cachedBuvid3?.let { return it }
+        return buvidMutex.withLock { cachedBuvid3 ?: loadOrCreateBuvid3() }
+    }
+
+    private suspend fun loadOrCreateBuvid3(): String {
+        val current = context.settingsDataStore.data.first()[buvid3Key]
+        if (!current.isNullOrBlank()) {
+            cachedBuvid3 = current
+            return current
+        }
+        val fresh = BiliIdentity.generateBuvid3()
+        context.settingsDataStore.edit { prefs -> prefs[buvid3Key] = fresh }
+        cachedBuvid3 = fresh
+        return fresh
     }
 
     suspend fun setQuality(value: String) {

@@ -197,8 +197,18 @@ class PlaybackQueueCoordinator(
                 player.clearLoadingNext()
                 return@launch
             }
-            val resolved = try {
-                withTimeout(PLAY_RESOLVE_TIMEOUT_MS) { shared.resolve(track) }
+            // Await the shared future directly (not shared.resolve) so a failed
+            // resolution keeps its reason — e.g. "请求过于频繁，请稍后再试"
+            // during a risk-control cooldown — instead of collapsing every
+            // failure into a generic "无法获取音源".
+            val result = try {
+                withTimeout(PLAY_RESOLVE_TIMEOUT_MS) { shared.resolveShared(track).await() }
+            } catch (e: TimeoutCancellationException) {
+                // Same contract as the tapped-song path: a slow B站 reads as a
+                // clear message, not a silent "点下一首没反应".
+                player.clearLoadingNext()
+                onMessage("下一首解析超时，请检查网络后重试")
+                return@launch
             } catch (e: CancellationException) {
                 player.clearLoadingNext()
                 return@launch
@@ -207,9 +217,10 @@ class PlaybackQueueCoordinator(
                 onMessage("下一首解析失败：${e.message ?: "无法获取音源"}")
                 return@launch
             }
+            val resolved = result.getOrNull()
             if (resolved == null || !resolved.hasAudio) {
                 player.clearLoadingNext()
-                onMessage("下一首解析失败：无法获取音源")
+                onMessage("下一首解析失败：${result.exceptionOrNull()?.message ?: "无法获取音源"}")
                 return@launch
             }
             // The user navigated away / started a new queue meanwhile.
@@ -261,6 +272,11 @@ class PlaybackQueueCoordinator(
         val tapped = tracks[i]
         val gen = ++queueGeneration
         queueJob?.cancel()
+        // Abandon the previous queue's resolutions the moment a new queue is
+        // tapped: its background fill / 下一首 on-demand / 预热 workers are
+        // already superseded, so cancel their in-flight B站 requests instead of
+        // letting them run orphaned (fixes the "频繁切换堆孤儿请求" burst).
+        shared.cancelInFlight()
         onMessage("解析音源中…")
         // Library lists (收藏/歌单) pin the queue to the list itself, so the
         // IMMEDIATE next track's resolution can START now, in parallel with

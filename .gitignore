@@ -21,6 +21,13 @@ android/assemble.log
 /*.apk
 /*.aab
 
+# Signing keystores are secrets and must never be committed. .sandbox-home is
+# the sandbox-only $HOME redirect that holds a copy of the debug keystore for
+# offline/AGP9 signing (the sandbox can't write the real ~/.android).
+*.keystore
+*.jks
+/.sandbox-home/
+
 # Local scratch / reference-extract directories
 /.gradle-tmp/
 /nav-src/

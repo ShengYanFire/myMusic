@@ -5,6 +5,7 @@ import com.mymusic.player.domain.MusicMoods
 import com.mymusic.player.domain.Track
 import com.mymusic.player.network.BiliDirectClient
 import com.mymusic.player.network.BiliPage
+import com.mymusic.player.network.BiliRiskControlException
 import com.mymusic.player.network.SearchItem
 import com.mymusic.player.util.runSuspendCatching
 import kotlinx.coroutines.CancellationException
@@ -180,6 +181,11 @@ class TrackRepository(
                     duration = (audio.duration ?: 0L).toInt().takeIf { it > 0 } ?: track.duration,
                 )
             } catch (e: CancellationException) {
+                throw e
+            } catch (e: BiliRiskControlException) {
+                // Risk control / cooldown: the right move is to STOP, not to
+                // fall through and fire a /view + playurl round trip that hits
+                // the very same block again (and extends it).
                 throw e
             } catch (e: Exception) {
                 // Fall through: stale cid / edited video / transient B站

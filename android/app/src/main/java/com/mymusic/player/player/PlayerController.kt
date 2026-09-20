@@ -260,12 +260,15 @@ object PlayerController {
                 freshResolved.add(mediaId)
                 _state.value = _state.value.copy(error = null, retrying = true)
                 scope.launch {
-                    val fresh = resolveFresh(track)
+                    val freshResult = resolveFresh(track)
                     if (controller !== c) return@launch // a newer controller took over
+                    val fresh = freshResult.getOrNull()
                     if (fresh == null || !fresh.hasAudio) {
                         // Re-resolution failed too — give up on this track.
+                        val reason = freshResult.exceptionOrNull()?.message
                         _state.value = _state.value.copy(
-                            error = "播放失败，重新解析音源也失败",
+                            error = if (reason == null) "播放失败，重新解析音源也失败"
+                                else "播放失败，重新解析音源也失败：$reason",
                             retrying = false,
                             isPlaying = false,
                         )
@@ -1104,20 +1107,12 @@ object PlayerController {
      * singleton. Direct-stream URLs carry a deadline and expire, so a
      * song that failed long after its queue was built (typical for background
      * playback) can be given a brand-new URL instead of being given up on.
-     * Null when the resolution fails.
+     * Returns a failed [Result] (with the original error) when resolution
+     * fails, so the caller can surface the real reason — e.g. a risk-control
+     * cooldown message — rather than a blanket "无法获取音源".
      */
-    private suspend fun resolveFresh(track: Track): Track? = try {
-        // Shared cache (AudioResolutionCache): the track already knows its cid,
-        // so the common case costs ONE playurl call instead of /view + playurl,
-        // and the fresh URL lands in the same TTL cache the queue fill uses —
-        // so a later replay/skip of this entry reuses it instead of re-hitting
-        // B站 from scratch.
-        MyMusicApp.instance.audioCache.resolve(track)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        null
-    }
+    private suspend fun resolveFresh(track: Track): Result<Track> =
+        MyMusicApp.instance.audioCache.resolveShared(track).await()
 
     /**
      * After giving up on the current track, jump to the next one so a dead

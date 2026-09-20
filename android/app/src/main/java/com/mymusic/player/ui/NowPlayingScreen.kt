@@ -10,6 +10,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -67,7 +68,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -75,6 +78,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import com.mymusic.player.data.Playlist
@@ -85,6 +89,7 @@ import com.mymusic.player.ui.theme.AuroraText
 import com.mymusic.player.ui.theme.Rose
 import com.mymusic.player.ui.theme.White40
 import com.mymusic.player.ui.theme.White70
+import com.mymusic.player.ui.theme.auroraAccent
 import com.mymusic.player.ui.theme.auroraFill
 import com.mymusic.player.ui.theme.auroraGlow
 import kotlin.math.abs
@@ -204,7 +209,6 @@ fun NowPlayingScreen(
         }
     }
 
-    // ---- Whole-page swipe up/down to switch tracks ----
     // The vertical drag detector lives on the root Box so the gesture works
     // anywhere on the play page. It only claims VERTICAL drags, so the seek
     // bar's horizontal drag, all taps/buttons and the album-art tap keep
@@ -253,11 +257,14 @@ fun NowPlayingScreen(
                         alpha = (1f - abs(discOffset) / swipeThresholdPx * 0.4f)
                             .coerceIn(0.6f, 1f)
                     }
-                    .padding(horizontal = 28.dp, vertical = 20.dp),
+                    .padding(horizontal = 22.dp, vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Spacer(Modifier.height(6.dp))
+                // ---- Eyebrow marker ----
+                EyebrowLabel()
+
+                Spacer(Modifier.height(16.dp))
 
                 // ---- Rotating vinyl disc (tap to open the lyrics page) ----
                 // Swiping anywhere on the page (including the album art) is
@@ -272,10 +279,10 @@ fun NowPlayingScreen(
                     // drifts around the spectrum with the whole app.
                     Box(
                         Modifier
-                            .size(320.dp)
-                            .auroraGlow(alpha = 0.35f),
+                            .size(330.dp)
+                            .auroraGlow(alpha = 0.32f),
                     )
-                    // Disc (outer ring + rotating cover).
+                    // Disc: dark vinyl body + etched grooves + rotating cover.
                     Box(
                         Modifier
                             .size(250.dp)
@@ -284,6 +291,9 @@ fun NowPlayingScreen(
                             .background(Color(0xFF0A1A20)),
                         contentAlignment = Alignment.Center,
                     ) {
+                        // Vinyl grooves etched into the rim ring, rotating
+                        // with the disc for a realistic record.
+                        VinylGrooves()
                         // Cover slides in from the direction the disc was
                         // swiped when the track changes.
                         AnimatedContent(
@@ -310,12 +320,12 @@ fun NowPlayingScreen(
                     Box(
                         Modifier
                             .size(196.dp)
-                            .border(1.dp, Color(0x22FFFFFF), CircleShape),
+                            .border(1.dp, Color(0x26FFFFFF), CircleShape),
                     )
                     // Center spindle.
                     Box(
                         Modifier
-                            .size(64.dp)
+                            .size(62.dp)
                             .shadow(8.dp, CircleShape)
                             .clip(CircleShape)
                             .auroraFill(CircleShape),
@@ -323,27 +333,32 @@ fun NowPlayingScreen(
                     ) {
                         Box(
                             Modifier
-                                .size(24.dp)
+                                .size(22.dp)
                                 .clip(CircleShape)
-                                .background(Color(0x55000000)),
+                                .background(Color(0x60000000)),
                         )
                     }
                 }
 
-                Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(24.dp))
+
+                // ---- Title / artist ----
                 Text(
                     current.title,
-                    style = MaterialTheme.typography.headlineSmall,
+                    style = MaterialTheme.typography.headlineMedium,
                     color = Color.White,
                     textAlign = TextAlign.Center,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(
                     current.author ?: "未知作者",
                     style = MaterialTheme.typography.bodyMedium,
                     color = White70,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
 
                 state.error?.let {
@@ -366,78 +381,36 @@ fun NowPlayingScreen(
                     buffering = state.buffering,
                 )
 
-                Spacer(Modifier.height(22.dp))
-
-                // ---- Shuffle / repeat (left) · sleep (right) row ----
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        GlassIconButton(
-                            onClick = { PlayerController.toggleShuffle() },
-                            icon = Icons.Filled.Shuffle,
-                            contentDescription = if (shuffleEnabled) "关闭随机播放" else "随机播放",
-                            tint = White40,
-                            accent = shuffleEnabled,
-                        )
-                        GlassIconButton(
-                            onClick = { PlayerController.cycleRepeatMode() },
-                            icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
-                                Icons.Filled.RepeatOne
-                            } else {
-                                Icons.Filled.Repeat
-                            },
-                            contentDescription = when (repeatMode) {
-                                Player.REPEAT_MODE_ONE -> "单曲循环"
-                                Player.REPEAT_MODE_ALL -> "列表循环"
-                                else -> "顺序播放"
-                            },
-                            tint = White40,
-                            accent = repeatMode > 0,
-                        )
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        sleepRemaining?.let {
-                            Text(
-                                "定时 ${formatMs(it)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = White70,
-                            )
-                        }
-                        GlassIconButton(
-                            onClick = { showSleepDialog = true },
-                            icon = Icons.Filled.Timer,
-                            contentDescription = "定时停止播放",
-                            tint = White40,
-                            accent = sleepRemaining != null,
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(20.dp))
 
                 // ---- Gradient seek bar (flowing aurora while playing) ----
                 PlayerSeekBar(isPlaying = state.isPlaying, durationMs = state.durationMs)
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(16.dp))
 
-                // ---- Transport controls ----
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // ---- Transport: shuffle · prev · play · next · repeat ----
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    GlassIconButton(
+                        onClick = { PlayerController.toggleShuffle() },
+                        icon = Icons.Filled.Shuffle,
+                        contentDescription = if (shuffleEnabled) "关闭随机播放" else "随机播放",
+                        tint = White40,
+                        accent = shuffleEnabled,
+                        size = 44.dp,
+                    )
                     GlassIconButton(
                         onClick = { PlayerController.playPrevious() },
                         icon = Icons.Filled.SkipPrevious,
                         contentDescription = "上一首",
-                        size = 56.dp,
+                        size = 54.dp,
                     )
-                    Spacer(Modifier.width(28.dp))
                     Box(
                         Modifier
-                            .size(84.dp)
+                            .size(80.dp)
                             .shadow(
                                 elevation = 16.dp,
                                 shape = CircleShape,
@@ -453,41 +426,64 @@ fun NowPlayingScreen(
                             if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                             contentDescription = if (state.isPlaying) "暂停" else "播放",
                             tint = Color.White,
-                            modifier = Modifier.size(46.dp),
+                            modifier = Modifier.size(42.dp),
                         )
                     }
-                    Spacer(Modifier.width(28.dp))
                     GlassIconButton(
                         onClick = { PlayerController.playNext() },
                         icon = Icons.Filled.SkipNext,
                         contentDescription = "下一首",
-                        size = 56.dp,
+                        size = 54.dp,
+                    )
+                    GlassIconButton(
+                        onClick = { PlayerController.cycleRepeatMode() },
+                        icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
+                            Icons.Filled.RepeatOne
+                        } else {
+                            Icons.Filled.Repeat
+                        },
+                        contentDescription = when (repeatMode) {
+                            Player.REPEAT_MODE_ONE -> "单曲循环"
+                            Player.REPEAT_MODE_ALL -> "列表循环"
+                            else -> "顺序播放"
+                        },
+                        tint = White40,
+                        accent = repeatMode > 0,
+                        size = 44.dp,
                     )
                 }
 
-                Spacer(Modifier.height(26.dp))
+                Spacer(Modifier.height(10.dp))
 
-                // ---- Favorite / queue / playlist ----
-                Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                    // uid (not bvid): a specific 分P is favorited, not the video.
-                    val isFavorite = favorites.any { it.uid == current.uid }
-                    GlassIconButton(
+                // ---- Secondary: favorite · playlist · queue · sleep ----
+                // uid (not bvid): a specific 分P is favorited, not the video.
+                val isFavorite = favorites.any { it.uid == current.uid }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    LabeledIconButton(
                         onClick = { scope.launch { vm.toggleFavorite(current) } },
                         icon = if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        contentDescription = "收藏",
+                        label = "收藏",
                         tint = if (isFavorite) Rose else White70,
                     )
-                    GlassIconButton(
-                        onClick = { showQueueSheet = true },
-                        icon = Icons.AutoMirrored.Filled.QueueMusic,
-                        contentDescription = "正在播放列表",
-                        tint = White70,
-                    )
-                    GlassIconButton(
+                    LabeledIconButton(
                         onClick = { showPlaylistDialog = true },
                         icon = Icons.AutoMirrored.Filled.PlaylistAdd,
-                        contentDescription = "加入歌单",
-                        tint = White70,
+                        label = "歌单",
+                    )
+                    LabeledIconButton(
+                        onClick = { showQueueSheet = true },
+                        icon = Icons.AutoMirrored.Filled.QueueMusic,
+                        label = "队列",
+                    )
+                    LabeledIconButton(
+                        onClick = { showSleepDialog = true },
+                        icon = Icons.Filled.Timer,
+                        label = sleepRemaining?.let { formatMs(it) } ?: "定时",
+                        accent = sleepRemaining != null,
+                        contentDescription = "定时停止播放",
                     )
                 }
                 Spacer(Modifier.height(12.dp))
@@ -579,6 +575,112 @@ fun NowPlayingScreen(
                     vm.requestPlay(state.queue, index, useListAsQueue = true) {}
                 }
             },
+        )
+    }
+}
+
+/**
+ * Small "正在播放" eyebrow label above the disc — a calm, letter-spaced
+ * marker with a living aurora dot, giving the page a clear focal point.
+ */
+@Composable
+private fun EyebrowLabel() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .auroraFill(CircleShape),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "正在播放",
+            style = MaterialTheme.typography.labelMedium,
+            color = White70,
+            letterSpacing = 4.sp,
+        )
+    }
+}
+
+/**
+ * Concentric vinyl grooves etched into the disc's rim ring. They live inside
+ * the rotating disc so the whole record spins as one — the grooves read as
+ * the outer LP ring while the cover acts as the center label.
+ */
+@Composable
+private fun VinylGrooves() {
+    Canvas(Modifier.fillMaxSize()) {
+        val r = size.minDimension / 2f
+        // Grooves sit between the cover edge (~0.78r) and the disc rim.
+        val inner = r * 0.79f
+        val outer = r * 0.965f
+        val steps = 12
+        for (i in 0 until steps) {
+            val t = i / (steps - 1f)
+            val radius = inner + (outer - inner) * t
+            val alpha = 0.12f - 0.08f * t
+            drawCircle(
+                color = Color.White.copy(alpha = alpha),
+                radius = radius,
+                center = center,
+                style = Stroke(width = 1.dp.toPx()),
+            )
+        }
+        // A hairline where the grooves meet the cover label.
+        drawCircle(
+            color = Color.White.copy(alpha = 0.14f),
+            radius = inner,
+            center = center,
+            style = Stroke(width = 1.dp.toPx()),
+        )
+    }
+}
+
+/**
+ * Glassy icon button with a caption underneath — the clean, labeled
+ * secondary-action cluster (收藏 / 歌单 / 队列 / 定时). When [accent] is set the
+ * icon and caption both breathe with the aurora (scoped to this leaf).
+ */
+@Composable
+private fun LabeledIconButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    label: String,
+    tint: Color = White70,
+    accent: Boolean = false,
+    contentDescription: String? = null,
+) {
+    val color = if (accent) auroraAccent() else tint
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Box(
+            Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(Color(0x1FFFFFFF)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = contentDescription ?: label,
+                tint = color,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            maxLines = 1,
         )
     }
 }

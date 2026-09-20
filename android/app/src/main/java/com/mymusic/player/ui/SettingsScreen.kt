@@ -3,6 +3,7 @@ package com.mymusic.player.ui
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,10 +20,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -48,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mymusic.player.data.AppSettings
@@ -66,6 +70,7 @@ fun SettingsScreen(
     val quality by vm.quality.collectAsState()
     val favoriteGenres by vm.favoriteGenres.collectAsState()
     val favoriteMoods by vm.favoriteMoods.collectAsState()
+    val isLoggedIn by vm.isLoggedIn.collectAsState()
     val scope = rememberCoroutineScope()
 
     // Both preference panels start collapsed (their summaries are always
@@ -96,18 +101,64 @@ fun SettingsScreen(
 
         // ---- Account ----
         SettingCard(title = "账号", icon = Icons.AutoMirrored.Filled.Login) {
-            Text(
-                "在 App 内完成网页登录（账号密码 / 短信验证码 / 扫码均可），登录成功自动保存，音质更高、更少被风控拦截。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(14.dp))
-            GradientButton(
-                text = "网页登录 B 站账号",
-                icon = Icons.AutoMirrored.Filled.Login,
-                onClick = onOpenLogin,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (isLoggedIn) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF34D399)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(11.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "已登录",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "已保存登录态，用于获取更高音质音源、更少被风控拦截。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    SecondaryButton(
+                        text = "退出登录",
+                        onClick = { scope.launch { vm.clearCookie() } },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    GradientButton(
+                        text = "重新登录",
+                        icon = Icons.AutoMirrored.Filled.Login,
+                        onClick = onOpenLogin,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            } else {
+                Text(
+                    "在 App 内完成网页登录（账号密码 / 短信验证码 / 扫码均可），登录成功自动保存，音质更高、更少被风控拦截。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(14.dp))
+                GradientButton(
+                    text = "网页登录 B 站账号",
+                    icon = Icons.AutoMirrored.Filled.Login,
+                    onClick = onOpenLogin,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
 
         Spacer(Modifier.height(16.dp))
@@ -470,5 +521,27 @@ private fun PreferenceChip(
             color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.labelLarge,
         )
+    }
+}
+
+/** Secondary (non-gradient) action button — used for the destructive 退出登录. */
+@Composable
+private fun SecondaryButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(20.dp)
+    val contentColor = MaterialTheme.colorScheme.error
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .border(1.dp, contentColor.copy(alpha = 0.45f), shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = contentColor, style = MaterialTheme.typography.labelLarge)
     }
 }

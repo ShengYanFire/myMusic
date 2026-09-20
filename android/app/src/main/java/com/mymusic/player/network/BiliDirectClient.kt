@@ -30,6 +30,19 @@ import okhttp3.Request
 class BiliDirectClient(
     private val settings: AppSettings,
     private val client: OkHttpClient,
+    /**
+     * Rate-limits `/x/player/wbi/playurl` resolution ([audioStream]) so rapid
+     * track switching cannot fire a playurl burst that trips B站 risk control
+     * (风控). A single instance app-wide — this client is built once in
+     * MyMusicApp — so the throttle is naturally shared by every resolution
+     * path (tapped song, background fill, 下一首 on-demand, error recovery).
+     */
+    private val throttle: ResolutionThrottle = ResolutionThrottle(),
+    /**
+     * Risk-control cooldown: one shared window app-wide, so a `-412/-509` seen
+     * on ANY endpoint cools down subsequent resolution requests for a while.
+     */
+    private val riskGate: RiskControlGate = RiskControlGate(),
 ) {
 
     @Volatile
@@ -99,10 +112,10 @@ class BiliDirectClient(
      * an uploader 合集 (ugc_season) — every episode of that collection, both
      * returned alongside the cid ([VideoInfo.pages] / [VideoInfo.seasonEpisodes]).
      */
-    suspend fun videoInfo(bvid: String): VideoInfo {
+    suspend fun videoInfo(bvid: String): VideoInfo = resolveGate {
         val d = get("/x/web-interface/view", mapOf("bvid" to bvid), signed = false)
             .obj("data")
-        return VideoInfo(
+        VideoInfo(
             cid = d.get("cid").longOrNull(),
             pages = videoPages(d),
             seasonEpisodes = seasonEpisodes(d),
@@ -164,7 +177,7 @@ class BiliDirectClient(
     /** Best audio-only DASH stream; quality "low" = least data. Returns the
      *  picked URL plus every available mirror/backup and lower tier so the
      *  player can degrade gracefully when a CDN node 403s. */
-    suspend fun audioStream(bvid: String, cid: Long, quality: String): AudioInfo {
+    suspend fun audioStream(bvid: String, cid: Long, quality: String): AudioInfo = resolveGate {
         val body = get(
             "/x/player/wbi/playurl",
             mapOf("bvid" to bvid, "cid" to cid, "fnval" to 16, "fourk" to 1),
@@ -198,7 +211,7 @@ class BiliDirectClient(
         // Duration of the tier we actually picked (raw list order may differ
         // from the quality-ordered one).
         val first = ordered.first()
-        return AudioInfo(
+        AudioInfo(
             url = urls.first(),
             urls = urls.toList(),
             duration = first.get("duration").longOrNull()
@@ -280,7 +293,7 @@ class BiliDirectClient(
                 .url(url)
                 .header("User-Agent", BiliHeaders.DESKTOP_UA)
                 .header("Referer", BiliHeaders.REFERER)
-            val cookie = settings.cookie.first()
+            val cookie = biliCookie()
             if (cookie.isNotBlank()) {
                 requestBuilder.header("Cookie", cookie)
             }
@@ -294,11 +307,49 @@ class BiliDirectClient(
                 // wbi_img keys in data — so tolerate it where login isn't required.
                 if (code != 0 && !(allowLoggedOut && code == -101)) {
                     val msg = obj.get("message")?.asString ?: "未知错误"
+                    if (riskGate.isRiskControl(code)) {
+                        // A risk-control code opens the cooldown right at the
+                        // source, so -412/-509 on ANY endpoint arms it (not just
+                        // playurl). Runs on the IO dispatcher; the gate's
+                        // @Volatile field makes the Main-side check see it now.
+                        riskGate.trigger()
+                        throw BiliRiskControlException("B 站接口错误（$code）$msg", code)
+                    }
                     throw RuntimeException("B 站接口错误（$code）$msg")
                 }
                 obj
             }
         }
+
+    /**
+     * Gate for the two resolution endpoints (/view + playurl): short-circuits
+     * with a readable hint while a risk-control cooldown is active, and
+     * otherwise runs through the global [throttle] (concurrency + spacing). A
+     * risk-control rejection returned inside [block] opens the cooldown for
+     * the NEXT call (done centrally by [get]).
+     */
+    private suspend fun <T> resolveGate(block: suspend () -> T): T {
+        riskGate.remainingCooldownMs()?.let { remaining ->
+            // ceil(remaining / 1000), min 1 — a 15s window reads "约 15 秒",
+            // not "约 16 秒" (the old `remaining/1000 + 1` over-rounded).
+            val secs = (remaining + 999) / 1000
+            throw BiliRiskControlException("请求过于频繁，请稍后再试（约 $secs 秒）")
+        }
+        return throttle.gate { block() }
+    }
+
+    /**
+     * The Cookie header for api.bilibili.com: the stable device fingerprint
+     * (buvid3) first, then the complete login identity. A consistent
+     * device+login pair reads as a normal browser to B站 risk control — the
+     * thing that lifts the 风控 threshold behind mass parse failures. Never
+     * used for media/CDN requests (those stay cookie-free).
+     */
+    private suspend fun biliCookie(): String =
+        BiliIdentity.buildApiCookie(
+            buvid3 = settings.ensureBuvid3(),
+            loginCookies = settings.cookie.first(),
+        )
 
     /**
      * WBI keys with a single-flight fetch: the mutex guarantees that the

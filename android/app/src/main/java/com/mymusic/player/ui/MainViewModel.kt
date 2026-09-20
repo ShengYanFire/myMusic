@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
@@ -75,6 +76,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Settings ----
     val quality: StateFlow<String> = settings.quality
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_QUALITY)
+
+    // ---- Login state ----
+    /** Whether a Bilibili login cookie (SESSDATA) has been saved. */
+    val isLoggedIn: StateFlow<Boolean> = settings.cookie
+        .map { it.isNotBlank() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     // ---- Music preference (喜欢的音乐类型 / 心情) ----
     /** IDs of the genres the user marked as favorites; empty = no preference. */
@@ -443,6 +450,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Settings actions ----
     suspend fun saveCookie(value: String) = settings.setCookie(value)
+    suspend fun clearCookie() = settings.clearCookie()
+
+    /** The per-install device fingerprint (buvid3), generated on first use. */
+    suspend fun ensureBuvid3(): String = settings.ensureBuvid3()
     suspend fun saveQuality(value: String) = settings.setQuality(value)
     suspend fun testConnection(): Boolean = repo.testConnection()
 }

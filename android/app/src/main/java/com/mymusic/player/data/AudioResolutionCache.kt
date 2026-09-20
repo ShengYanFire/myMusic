@@ -56,7 +56,8 @@ class AudioResolutionCache(
             cache.remove(uid)
         }
         inFlight[uid]?.let { return it }
-        val deferred = scope.async(start = CoroutineStart.LAZY) {
+        lateinit var deferred: Deferred<Result<Track>>
+        deferred = scope.async(start = CoroutineStart.LAZY) {
             try {
                 val result = try {
                     Result.success(resolveFast(track))
@@ -73,9 +74,12 @@ class AudioResolutionCache(
                 }
                 result
             } finally {
-                // Even a failure or a cancelled await must unregister, or a
-                // later request would forever join a dead deferred.
-                inFlight.remove(uid)
+                // Unregister ONLY if we are still the registered future: a
+                // superseding play queue calls [cancelInFlight] and may then
+                // start a brand-new resolution for the same uid, and this old
+                // future's finally must not clobber that newer registration.
+                // (A failure/cancelled await still unregisters itself.)
+                if (inFlight[uid] === deferred) inFlight.remove(uid)
             }
         }
         inFlight[uid] = deferred
@@ -85,6 +89,29 @@ class AudioResolutionCache(
 
     /** Await the shared resolution future; null when it failed. */
     suspend fun resolve(track: Track): Track? = resolveShared(track).await().getOrNull()
+
+    /**
+     * Cancel every in-flight resolution and drop the registration map.
+     *
+     * Called by the queue coordinator exactly once per play-queue supersession:
+     * the moment a new song is tapped, the previous episode's background fill
+     * and any on-demand/预热 resolutions are no longer wanted. Cancelling them
+     * here — instead of letting their app-scope coroutines run orphaned to
+     * completion — makes `Network.awaitCall` actually cancel the underlying
+     * B站 request, so rapid switching stops emitting orphaned requests the
+     * instant the old queue is abandoned.
+     *
+     * The per-uid resolved-URL TTL cache is left intact (only in-flight work
+     * is dropped), so a later replay/skip still reuses fresh URLs. Snapshot +
+     * clear-before-cancel plus the [resolveShared] `===` guard keep this race
+     * free: an old future's `finally` can never unregister a newer one that
+     * already took over the same uid.
+     */
+    fun cancelInFlight() {
+        val inFlightNow = inFlight.values.toList()
+        inFlight.clear()
+        inFlightNow.forEach { it.cancel() }
+    }
 
     /**
      * The freshly-resolved (TTL-valid) copy of [track] from this cache, or
