@@ -31,6 +31,10 @@ class AudioResolutionCacheTest {
         val a = cache.resolveShared(track("A"))
         val b = cache.resolveShared(track("A"))
         assertTrue(a === b)
+        // Free the shared resolution so no coroutine outlives the test body
+        // (the eager start parks it on gate.await()).
+        gate.complete(Unit)
+        advanceUntilIdle()
     }
 
     @Test
@@ -85,6 +89,51 @@ class AudioResolutionCacheTest {
         advanceUntilIdle()
         assertEquals(2, resolutions) // first + second, never a third
     }
+
+    @Test
+    fun `a cached URL past its deadline is re-resolved, not replayed`() = runTest {
+        var resolutions = 0
+        val cache = AudioResolutionCache(
+            resolveFast = { t ->
+                resolutions++
+                // Resolving just now, yet the URL is already deadline-expired —
+                // second query must treat this cache entry as stale, not reuse it.
+                t.copy(audioUrl = expiredUrl(t.uid))
+            },
+            scope = this,
+        )
+        cache.resolveShared(track("A")).await()
+        assertEquals(1, resolutions)
+
+        val second = cache.resolveShared(track("A")).await()
+        assertEquals(2, resolutions)
+        assertTrue(second.getOrNull()?.hasAudio == true)
+    }
+
+    @Test
+    fun `force bypasses a fresh cache hit and resolves anew`() = runTest {
+        var resolutions = 0
+        val cache = AudioResolutionCache(
+            resolveFast = { t ->
+                resolutions++
+                t.copy(audioUrl = "https://cdn/${t.uid}.m4s?deadline=${(System.currentTimeMillis() + 3_600_000L) / 1000}")
+            },
+            scope = this,
+        )
+        cache.resolveShared(track("A")).await()
+        // A healthy (non-forced) caller reuses the cache without re-resolving.
+        cache.resolveShared(track("A")).await()
+        assertEquals(1, resolutions)
+
+        // Forced re-resolution (error recovery) must never hand back the
+        // cached URL — it resolves anew.
+        val forced = cache.resolveShared(track("A"), force = true).await()
+        assertEquals(2, resolutions)
+        assertTrue(forced.getOrNull()?.hasAudio == true)
+    }
+
+    private fun expiredUrl(uid: String) =
+        "https://cdn/$uid.m4s?deadline=${(System.currentTimeMillis() - 10_000L) / 1000}"
 
     private fun track(bvid: String) = Track(bvid = bvid, title = "t-$bvid")
 }

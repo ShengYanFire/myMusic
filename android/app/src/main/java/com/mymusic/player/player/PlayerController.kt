@@ -17,6 +17,7 @@ import com.google.common.util.concurrent.MoreExecutors
 import com.mymusic.player.MyMusicApp
 import com.mymusic.player.data.SavedPlaybackState
 import com.mymusic.player.domain.Track
+import com.mymusic.player.network.AudioUrlExpiry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -228,7 +229,12 @@ object PlayerController {
             val idx = mediaId?.let { pendingIndex[it] } ?: 0
 
             // 1) Cheap local fallback: rotate among the stored mirror URLs.
-            if (retryable && c != null && mediaId != null &&
+            //    This can only rescue a SINGLE dead CDN node. When the URL that
+            //    just failed is already past its `deadline`, every mirror in the
+            //    same playurl response is past it too, so rotation is pure waste
+            //    — jump straight to re-resolution (step 2) instead.
+            val deadlineExpired = AudioUrlExpiry.isExpired(candidateUrls.getOrNull(idx))
+            if (retryable && c != null && mediaId != null && !deadlineExpired &&
                 candidateUrls.size > 1 && idx < candidateUrls.lastIndex
             ) {
                 val next = idx + 1
@@ -578,9 +584,11 @@ object PlayerController {
             // next item is a LATER song — jumping to it would silently pass
             // over the logical next, so that case falls through to the
             // on-demand path below instead.)
-            next < count && isNextInTimeline(c) -> seekAndPlay(c, next)
+            next < count && isNextInTimeline(c) && !isTimelineItemUrlExpired(c, next) ->
+                seekAndPlay(c, next)
             // 列表循环: wrap around to the first song — never onto the current one.
-            c.repeatMode == Player.REPEAT_MODE_ALL && count > 1 -> seekAndPlay(c, 0)
+            c.repeatMode == Player.REPEAT_MODE_ALL && count > 1 &&
+                !isTimelineItemUrlExpired(c, 0) -> seekAndPlay(c, 0)
             // Repeat off / 单曲循环 at the end of the player timeline: the next
             // LOGICAL queue entry is still being resolved in the background (or
             // was skipped by the fill after a failed resolve). Resolve it on
@@ -603,6 +611,25 @@ object PlayerController {
         if (qi < 0 || qi + 1 >= q.size) return true
         val j = c.currentMediaItemIndex + 1
         return j < c.mediaItemCount && c.getMediaItemAt(j).mediaId == q[qi + 1].uid
+    }
+
+    /** True when the media item at [index] carries a direct URL past its deadline. */
+    private fun isTimelineItemUrlExpired(c: MediaController, index: Int): Boolean {
+        if (index < 0 || index >= c.mediaItemCount) return false
+        return isTrackUrlExpired(c.getMediaItemAt(index).mediaId)
+    }
+
+    /**
+     * True when [uid]'s currently-registered direct URL is provably past its
+     * `deadline`. No registered URL (track not yet resolved / inserted) or an
+     * unparsable deadline both mean "unknown", deliberately NOT "expired" — the
+     * reactive 403 → mirror-rotation / re-resolve path still covers those.
+     */
+    private fun isTrackUrlExpired(uid: String?): Boolean {
+        if (uid == null) return false
+        val url = pendingTrack[uid]?.usableAudioUrls?.firstOrNull()
+            ?: pendingUrls[uid]?.firstOrNull()
+        return AudioUrlExpiry.isExpired(url)
     }
 
     /**
@@ -633,11 +660,17 @@ object PlayerController {
         val currentUid = _state.value.current?.uid
         if (target.uid == currentUid) return
         // Already in the player timeline (the background fill beat us to it):
-        // a plain seek is instant, mirroring the healthy-path seekAndPlay.
+        // a plain seek is instant, mirroring the healthy-path seekAndPlay — but
+        // only when its URL is not deadline-expired. A long-idle session keeps
+        // dead URLs in the timeline, and seeking into one would instantly 403;
+        // re-resolve on demand instead.
         for (j in 0 until c.mediaItemCount) {
             if (c.getMediaItemAt(j).mediaId == target.uid) {
-                seekAndPlay(c, j)
-                return
+                if (!isTrackUrlExpired(target.uid)) {
+                    seekAndPlay(c, j)
+                    return
+                }
+                break
             }
         }
         // Already being resolved on demand from a previous tap — don't fire a
@@ -886,9 +919,23 @@ object PlayerController {
         val cur = c.currentMediaItemIndex
         for (j in 0 until c.mediaItemCount) {
             if (c.getMediaItemAt(j).mediaId == track.uid) {
-                // Already in the timeline (the fill beat us to it): plain seek.
-                seekAndPlay(c, j)
-                c.play()
+                // Already in the timeline. If its registered URL is deadline-
+                // expired, we just resolved a FRESH one on demand — swap the
+                // item's URI first, or the seek replays the dead link and 403s
+                // again. Otherwise this is the plain fill-beat-us race: seek.
+                if (isTrackUrlExpired(track.uid)) {
+                    pendingUrls[track.uid] = urls
+                    pendingIndex[track.uid] = 0
+                    pendingTrack[track.uid] = track
+                    c.replaceMediaItem(j, toMediaItem(track, urls.first()))
+                    c.seekTo(j, 0L)
+                    c.prepare()
+                    c.play()
+                    mergeResolvedIntoQueue(track)
+                } else {
+                    seekAndPlay(c, j)
+                    c.play()
+                }
                 return true
             }
         }
@@ -1112,7 +1159,7 @@ object PlayerController {
      * cooldown message — rather than a blanket "无法获取音源".
      */
     private suspend fun resolveFresh(track: Track): Result<Track> =
-        MyMusicApp.instance.audioCache.resolveShared(track).await()
+        MyMusicApp.instance.audioCache.resolveShared(track, force = true).await()
 
     /**
      * After giving up on the current track, jump to the next one so a dead

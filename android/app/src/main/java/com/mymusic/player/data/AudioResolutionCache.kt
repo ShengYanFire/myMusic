@@ -1,6 +1,7 @@
 package com.mymusic.player.data
 
 import com.mymusic.player.domain.Track
+import com.mymusic.player.network.AudioUrlExpiry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -46,14 +47,24 @@ class AudioResolutionCache(
      * immediately, an in-flight request is returned as-is, and otherwise a new
      * resolution STARTS NOW (a caller asking early gives later callers a head
      * start). Failures resolve to [Result.failure]; cancellation propagates.
+     *
+     * [force] bypasses the TTL cache hit (and evicts any cached copy first):
+     * the player's error-recovery uses it so a "re-resolve" can never hand back
+     * the very URL that just 403'd. A remaining in-flight future is still
+     * shared because an in-flight future is, by construction, a fresh round
+     * trip started on a cache miss.
      */
-    fun resolveShared(track: Track): Deferred<Result<Track>> {
+    fun resolveShared(track: Track, force: Boolean = false): Deferred<Result<Track>> {
         val uid = track.uid
-        cache[uid]?.let { (cached, at) ->
-            if (System.currentTimeMillis() - at < TTL_MS && cached.hasAudio) {
-                return CompletableDeferred(Result.success(cached))
-            }
+        if (force) {
             cache.remove(uid)
+        } else {
+            cache[uid]?.let { (cached, at) ->
+                if (isFresh(cached, at)) {
+                    return CompletableDeferred(Result.success(cached))
+                }
+                cache.remove(uid)
+            }
         }
         inFlight[uid]?.let { return it }
         lateinit var deferred: Deferred<Result<Track>>
@@ -121,11 +132,26 @@ class AudioResolutionCache(
      */
     fun cached(track: Track): Track? {
         cache[track.uid]?.let { (cached, at) ->
-            if (System.currentTimeMillis() - at < TTL_MS && cached.hasAudio) {
+            if (isFresh(cached, at)) {
                 return cached
             }
         }
         return null
+    }
+
+    /**
+     * A cached entry is usable when it has audio, is inside [TTL_MS], and its
+     * primary URL's own `deadline` has not lapsed. The last condition matters:
+     * a URL that expires (or the CDN refuses early, e.g. after a network/IP
+     * switch) within the TTL window is just as dead as a long-expired one, and
+     * must not round-trip as a "success".
+     */
+    private fun isFresh(entry: Track, resolvedAtMs: Long): Boolean {
+        if (!entry.hasAudio) return false
+        val now = System.currentTimeMillis()
+        if (now - resolvedAtMs >= TTL_MS) return false
+        val primary = entry.usableAudioUrls.firstOrNull()
+        return !AudioUrlExpiry.isExpired(primary, now)
     }
 
     private companion object {
