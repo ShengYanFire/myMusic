@@ -41,14 +41,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.mymusic.player.data.Playlist
 import com.mymusic.player.domain.Track
-import com.mymusic.player.ui.theme.AuroraIcon
-import com.mymusic.player.ui.theme.Rose
-import com.mymusic.player.ui.theme.auroraFill
+import com.mymusic.player.ui.theme.Accent
+import com.mymusic.player.ui.theme.AccentIcon
+import com.mymusic.player.ui.theme.accentFill
 import kotlinx.coroutines.launch
 
 @Composable
@@ -161,7 +160,7 @@ fun LibraryScreen(
     }
 }
 
-/** Pill-shaped segmented control with a living gradient indicator. */
+/** Pill-shaped segmented control with a fixed electric indicator. */
 @Composable
 private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
     val options = listOf("收藏", "歌单")
@@ -170,7 +169,7 @@ private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .padding(4.dp),
     ) {
         options.forEachIndexed { i, label ->
@@ -180,7 +179,7 @@ private fun SegmentedTabs(selected: Int, onSelect: (Int) -> Unit) {
                     .weight(1f)
                     .clip(RoundedCornerShape(12.dp))
                     .then(
-                        if (isSelected) Modifier.auroraFill(RoundedCornerShape(12.dp)) else Modifier,
+                        if (isSelected) Modifier.accentFill() else Modifier,
                     )
                     .clickable { onSelect(i) }
                     .padding(vertical = 10.dp),
@@ -207,7 +206,8 @@ private fun FavoritesContent(
         EmptyHint("还没有收藏，播放时点 ♥ 收藏", Modifier.fillMaxSize())
         return
     }
-    LazyColumn(Modifier.fillMaxSize()) {
+    val listState = rememberSaveableLazyListState()
+    LazyColumn(Modifier.fillMaxSize(), state = listState) {
         item {
             Text(
                 "${favorites.size} 首收藏",
@@ -226,7 +226,7 @@ private fun FavoritesContent(
                         Icon(
                             Icons.Filled.Favorite,
                             contentDescription = "取消收藏",
-                            tint = Rose,
+                            tint = Accent,
                         )
                     }
                 },
@@ -241,6 +241,7 @@ private fun PlaylistsContent(
     onOpen: (Playlist) -> Unit,
     onCreate: () -> Unit,
 ) {
+    val listState = rememberSaveableLazyListState()
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier
@@ -263,14 +264,14 @@ private fun PlaylistsContent(
         if (playlists.isEmpty()) {
             EmptyHint("暂无歌单", Modifier.fillMaxSize())
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize(), state = listState) {
                 items(playlists, key = { it.id }) { playlist ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 5.dp)
                             .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
                             .clickable { onOpen(playlist) }
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -278,9 +279,8 @@ private fun PlaylistsContent(
                         Box(
                             Modifier
                                 .size(48.dp)
-                                .shadow(6.dp, RoundedCornerShape(14.dp))
                                 .clip(RoundedCornerShape(14.dp))
-                                .auroraFill(RoundedCornerShape(14.dp)),
+                                .accentFill(),
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
@@ -301,7 +301,7 @@ private fun PlaylistsContent(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        AuroraIcon(Icons.Filled.PlayArrow, contentDescription = "播放")
+                        AccentIcon(Icons.Filled.PlayArrow, contentDescription = "播放")
                     }
                 }
             }
@@ -340,7 +340,7 @@ private fun PlaylistDetailScreen(
                 onClick = onPlayAll,
                 enabled = playlist.tracks.isNotEmpty(),
             ) {
-                AuroraIcon(Icons.Filled.PlayArrow, contentDescription = "全部播放")
+                AccentIcon(Icons.Filled.PlayArrow, contentDescription = "全部播放")
             }
             IconButton(onClick = { showRenameDialog = true }) {
                 Icon(Icons.Filled.Edit, contentDescription = "重命名歌单")
@@ -353,7 +353,8 @@ private fun PlaylistDetailScreen(
             EmptyHint("歌单为空", Modifier.fillMaxSize())
             return@Column
         }
-        LazyColumn(Modifier.fillMaxSize()) {
+        val listState = rememberSaveableLazyListState()
+        LazyColumn(Modifier.fillMaxSize(), state = listState) {
             item {
                 Row(
                     Modifier
@@ -367,9 +368,7 @@ private fun PlaylistDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
-                    GradientButton(
-                        text = "全部播放",
-                        icon = Icons.Filled.PlayArrow,
+                    PlayAllButton(
                         onClick = onPlayAll,
                         enabled = playlist.tracks.isNotEmpty(),
                     )

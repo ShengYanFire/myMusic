@@ -58,15 +58,6 @@ class AppSettings(private val context: Context) {
 
     // ---- Device fingerprint (buvid3) ----
 
-    /**
-     * The anonymous per-install device fingerprint B站 uses for risk control.
-     * Stable across launches, logins and logouts; generated once and never
-     * cleared by 退出登录 (it identifies the device, not the account).
-     */
-    val buvid3: Flow<String> = context.settingsDataStore.data.map { prefs ->
-        prefs[buvid3Key] ?: ""
-    }
-
     private val buvidMutex = Mutex()
 
     /** In-process copy (hot path); the persisted DataStore value stays authoritative. */

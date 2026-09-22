@@ -1,20 +1,13 @@
 package com.mymusic.player.ui
 
-import android.os.Build
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -30,8 +23,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -47,24 +43,17 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -76,184 +65,14 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.mymusic.player.domain.Track
 import com.mymusic.player.player.PlayerController
-import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.AuroraSky
-import com.mymusic.player.ui.theme.LocalAuroraColorPhase
-import com.mymusic.player.ui.theme.TAU
-import com.mymusic.player.ui.theme.White70
-import com.mymusic.player.ui.theme.auroraAccent
-import com.mymusic.player.ui.theme.auroraBrushAt
-import com.mymusic.player.ui.theme.auroraColorAt
-import com.mymusic.player.ui.theme.auroraFill
-import com.mymusic.player.ui.theme.auroraWindow
+import com.mymusic.player.ui.theme.accentColor
+import com.mymusic.player.ui.theme.accentFill
+import com.mymusic.player.ui.theme.accentHorizontalGradientBrush
 import kotlin.math.roundToInt
-import kotlin.math.sin
-
-/** Duration of one full aurora flow cycle through a progress bar. */
-private const val AuroraFlowDurationMs = 2600
-
-/** Duration of one drift cycle of the silk ribbons around the seek bar. */
-private const val RibbonDriftDurationMs = 3800
 
 /**
- * Builds the flowing-aurora brush for a bar [widthPx] wide at slide phase
- * [phase] in 0f..1f, tinted by the global aurora spectrum position [hue].
- * The gradient spans two color periods and slides one period per cycle, so
- * the colors stream continuously through the fill while their hues drift
- * around the shared spectrum — the bar never repeats the same view twice.
- */
-private fun flowingAuroraBrush(widthPx: Float, phase: Float, heightPx: Float, hue: Float): Brush {
-    val period = widthPx * 2f
-    val start = -period + phase * period
-    // Two full windows of the current hue (plus the wrapped first color) so
-    // the fill can slide by exactly one period per loop and stay seamless at
-    // every hue.
-    val window = auroraWindow(hue, count = 3)
-    val flowColors = window + window + window.first()
-    return Brush.linearGradient(
-        colors = flowColors,
-        start = Offset(start, 0f),
-        end = Offset(start + period * 2f, heightPx),
-    )
-}
-
-/** Organic silk wave: a main sine plus a weaker harmonic ripple, in [-1, 1]. */
-private fun waveOffset(x: Float, wavelength: Float, phase: Float): Float {
-    val a = x / wavelength * TAU + phase * TAU
-    return 0.7f * sin(a) + 0.3f * sin(2f * a + 1.3f)
-}
-
-/**
- * A comet-like silk tail streaming from the thumb bead: a tapered aurora band
- * anchored at [headX] (the bead) and trailing leftward for [tailLength],
- * waving around [baseY]. The head is thick and bright; toward the tail end the
- * band narrows and fades, with two loose threads peeling off beyond it. A soft
- * layered aura dissipates around the whole band. The wave pattern is anchored
- * to the head, so the tail follows the bead as one coherent shape while
- * [wavePhase] streams the silk backward like a wind-blown scarf.
- */
-private fun DrawScope.drawSilkTail(
-    headX: Float,
-    baseY: Float,
-    amplitude: Float,
-    headThickness: Float,
-    tailLength: Float,
-    wavePhase: Float,
-    wavelength: Float,
-    hue: Float,
-) {
-    val tailX = headX - tailLength
-    val step = 8f
-
-    // Wave anchored to the head so the whole tail travels with the bead.
-    fun waveAt(x: Float) = amplitude * waveOffset(x - headX, wavelength, wavePhase)
-
-    // Taper: full thickness at the head, thin at the tail end.
-    fun thickAt(x: Float): Float {
-        val u = ((headX - x) / tailLength).coerceIn(0f, 1f)
-        return headThickness * (1f - 0.85f * u)
-    }
-
-    fun topAt(x: Float) = baseY - thickAt(x) / 2f + waveAt(x)
-    fun botAt(x: Float) = baseY + thickAt(x) / 2f + waveAt(x)
-
-    // ---- Band: top edge head → tail, bottom edge back. ----
-    val bandPath = Path()
-    var x = headX
-    bandPath.moveTo(x, topAt(x))
-    while (x > tailX) {
-        x = (x - step).coerceAtLeast(tailX)
-        bandPath.lineTo(x, topAt(x))
-    }
-    var bx = tailX
-    while (bx < headX) {
-        bandPath.lineTo(bx, botAt(bx))
-        bx = (bx + step).coerceAtMost(headX)
-    }
-    bandPath.lineTo(headX, botAt(headX))
-    bandPath.close()
-
-    // ---- Spine: the bright core line from head to tail. ----
-    val spinePath = Path()
-    var sx = headX
-    spinePath.moveTo(sx, baseY + waveAt(sx))
-    while (sx > tailX) {
-        sx = (sx - step).coerceAtLeast(tailX)
-        spinePath.lineTo(sx, baseY + waveAt(sx))
-    }
-
-    val shimmer = 0.85f + 0.15f * sin(wavePhase * 4f * TAU + 2f)
-    // The silk shimmers through the shared spectrum: the global hue drifts
-    // slowly while the ribbon's own drift phase streams it backward.
-    val silkHue = hue + wavePhase * 0.4f
-    val hueHead = auroraColorAt(silkHue)
-    val hueMid = auroraColorAt(silkHue + 0.22f)
-    val hueTail = auroraColorAt(silkHue + 0.4f)
-
-    // ---- 逸散阴影: layered aura dissipating around the whole band. ----
-    val auraBrush = Brush.horizontalGradient(
-        colorStops = arrayOf(
-            0f to hueHead.copy(alpha = 0.10f * shimmer),
-            0.55f to hueMid.copy(alpha = 0.05f),
-            1f to hueTail.copy(alpha = 0f),
-        ),
-        startX = headX,
-        endX = tailX,
-    )
-    drawPath(bandPath, auraBrush, style = Stroke(width = 18.dp.toPx(), cap = StrokeCap.Round))
-    drawPath(bandPath, auraBrush, style = Stroke(width = 10.dp.toPx(), cap = StrokeCap.Round))
-
-    // ---- Band fill, fading toward the tail. ----
-    val fillBrush = Brush.horizontalGradient(
-        colorStops = arrayOf(
-            0f to hueHead.copy(alpha = 0.5f * shimmer),
-            0.4f to hueMid.copy(alpha = 0.32f),
-            1f to hueTail.copy(alpha = 0f),
-        ),
-        startX = headX,
-        endX = tailX,
-    )
-    drawPath(bandPath, fillBrush)
-
-    // ---- Spine glow + crisp core. ----
-    val spineBrush = Brush.horizontalGradient(
-        colorStops = arrayOf(
-            0f to hueHead.copy(alpha = 0.95f),
-            0.35f to hueMid.copy(alpha = 0.6f),
-            0.7f to hueTail.copy(alpha = 0.3f),
-            1f to hueTail.copy(alpha = 0f),
-        ),
-        startX = headX,
-        endX = tailX,
-    )
-    drawPath(spinePath, spineBrush, alpha = 0.12f, style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round))
-    drawPath(spinePath, spineBrush, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
-
-    // ---- 拖尾: two loose threads peeling off past the tail end. ----
-    val wispLen = tailLength * 0.38f
-    val wispStart = tailX + tailLength * 0.18f
-    val wispBrush = Brush.horizontalGradient(
-        colors = listOf(hueTail.copy(alpha = 0.3f), Color.Transparent),
-        startX = wispStart,
-        endX = tailX - wispLen,
-    )
-    val wispOffsets = listOf(0.35f to 1.5.dp.toPx(), 0.6f to -1.5.dp.toPx())
-    for ((phaseOff, vOff) in wispOffsets) {
-        val wisp = Path()
-        var wx = wispStart
-        wisp.moveTo(wx, baseY + vOff + amplitude * 0.8f * waveOffset(wx - headX, wavelength, wavePhase + phaseOff))
-        while (wx > tailX - wispLen) {
-            wx = (wx - step).coerceAtLeast(tailX - wispLen)
-            wisp.lineTo(wx, baseY + vOff + amplitude * 0.8f * waveOffset(wx - headX, wavelength, wavePhase + phaseOff))
-        }
-        drawPath(wisp, wispBrush, style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round))
-    }
-}
-
-/**
- * Rounded pill button filled with the *living* aurora gradient — the fill's
- * hues drift around the spectrum and its tilt sways like a hanging curtain.
- * Used for primary actions ("全部播放", "网页登录", ...).
+ * Rounded pill button filled with the FLAT brand red (网易云红). Used for
+ * primary actions ("全部播放", "网页登录", ...).
  */
 @Composable
 fun GradientButton(
@@ -262,22 +81,15 @@ fun GradientButton(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     enabled: Boolean = true,
-    phaseOffset: Float = 0f,
 ) {
-    val shape = RoundedCornerShape(20.dp)
-    val contentColor = if (enabled) Color.White else Color.White.copy(alpha = 0.45f)
+    val shape = RoundedCornerShape(18.dp)
+    val contentColor = if (enabled) Color.White else Color.White.copy(alpha = 0.55f)
     Box(
         modifier = modifier
-            .shadow(
-                elevation = 8.dp,
-                shape = shape,
-                ambientColor = Color(0x40000000),
-                spotColor = Color(0x40000000),
-            )
             .clip(shape)
             .then(
                 if (enabled) {
-                    Modifier.auroraFill(shape, phaseOffset = phaseOffset)
+                    Modifier.accentFill()
                 } else {
                     Modifier.background(
                         SolidColor(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
@@ -299,11 +111,23 @@ fun GradientButton(
 }
 
 /**
- * Thin rounded progress bar whose fill is the living aurora gradient. The
- * fill's hues drift around the shared spectrum at all times; while [animated]
- * is true (music playing) the colors additionally flow through the fill and
- * the progress crawls smoothly between the player's 500 ms position ticks
- * instead of stepping.
+ * Red "全部播放" pill, shared by search results, recommendations and playlist
+ * headers so the icon/text stay consistent everywhere.
+ */
+@Composable
+fun PlayAllButton(onClick: () -> Unit, enabled: Boolean = true) {
+    GradientButton(
+        text = "全部播放",
+        icon = Icons.Filled.PlayArrow,
+        onClick = onClick,
+        enabled = enabled,
+    )
+}
+
+/**
+ * Thin rounded progress bar whose fill is the flat brand red. The progress
+ * crawls smoothly between the player's 500 ms position ticks; while [animated]
+ * is false (music paused) the fill reads a touch dimmer.
  */
 @Composable
 fun GradientProgressBar(
@@ -314,8 +138,6 @@ fun GradientProgressBar(
 ) {
     val fraction = progress.coerceIn(0f, 1f)
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
-    // Color-only consumer → quantized aurora clock (~8 redraws/s, not 60+).
-    val aurora = LocalAuroraColorPhase.current
 
     // Snap on big backward jumps (track change / notification seek) so the
     // bar never glides the WRONG way across the whole track; otherwise tween
@@ -324,8 +146,6 @@ fun GradientProgressBar(
     val snapNow = fraction < lastTarget - 0.02f
     LaunchedEffect(fraction) { lastTarget = fraction }
 
-    // Buttery crawl: interpolate between the discrete position ticks.
-    // Remembered so the animation isn't restarted by recompositions.
     val glideSpec = remember { tween<Float>(durationMillis = 500, easing = LinearEasing) }
     val snapSpec = remember { snap<Float>() }
     val display by animateFloatAsState(
@@ -333,21 +153,6 @@ fun GradientProgressBar(
         animationSpec = if (snapNow) snapSpec else glideSpec,
         label = "miniProgress",
     )
-
-    val phase: Float = if (animated) {
-        val infinite = rememberInfiniteTransition(label = "miniFlow")
-        val p by infinite.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(AuroraFlowDurationMs, easing = LinearEasing),
-            ),
-            label = "miniPhase",
-        )
-        p
-    } else {
-        0f
-    }
 
     Canvas(modifier) {
         val corner = CornerRadius(cornerRadius.toPx(), cornerRadius.toPx())
@@ -357,15 +162,8 @@ fun GradientProgressBar(
         )
         val fillWidth = size.width * display
         if (fillWidth > 0f) {
-            val hue = aurora.value
-            val brush = if (animated) {
-                flowingAuroraBrush(size.width, phase, size.height, hue)
-            } else {
-                // Paused: the hues still drift slowly with the global clock.
-                auroraBrushAt(hue, size)
-            }
             drawRoundRect(
-                brush = brush,
+                brush = accentHorizontalGradientBrush(fillWidth, if (animated) 1f else 0.7f),
                 size = Size(fillWidth, size.height),
                 cornerRadius = corner,
             )
@@ -385,10 +183,10 @@ fun AlbumCover(
     val base = Modifier
         .size(size)
         .shadow(
-            elevation = 6.dp,
+            elevation = 2.dp,
             shape = shape,
-            ambientColor = Color(0x2E000000),
-            spotColor = Color(0x2E000000),
+            ambientColor = Color(0x14000000),
+            spotColor = Color(0x14000000),
         )
         .clip(shape)
     val modifier = if (onClick != null) base.clickable(onClick = onClick) else base
@@ -401,30 +199,16 @@ fun AlbumCover(
 }
 
 /**
- * Tappable + draggable seek bar threaded by a single aurora silk ribbon.
+ * Tappable + draggable seek bar with a flat red fill (no glow).
  *
- * Decorations (always alive):
- *  - a comet-like silk tail streams from the thumb bead: a tapered aurora
- *    band anchored to the bead and stretching back over exactly the played
- *    portion of the track — its length mirrors the progress — waving above
- *    and below the bar as the bead travels; it fades toward its far end
- *    (the bar's start) with loose trailing threads and a soft aura;
- *  - the thumb is a small aurora bead the same thickness as the bar itself;
- *    touching/dragging it pops it up with a springy scale.
- *
- * While [active] (music playing):
- *  - the aurora gradient flows continuously through the filled part,
- *  - the thumb carries a breathing aurora halo,
- *  - progress glides smoothly between the player's 500 ms position ticks.
- *
- * Large backward jumps (track change, seek from the notification) snap
- * instantly instead of gliding backwards.
+ * Progress glides smoothly between the player's 500 ms position ticks; large
+ * backward jumps (track change, notification seek) snap instantly instead of
+ * gliding backwards. Touching/dragging pops the thumb up with a springy scale.
  *
  * [progress] is 0f..1f. A tap or drag calls [onValueChange] with the touched
  * fraction so the parent can preview it; the actual seek is committed once via
- * [onSeekFinished] (the parent applies the real seek there). If the gesture is
- * cancelled (stolen by a parent scroll, system gesture, ...) [onSeekCancelled]
- * is called instead so the parent can drop its preview without seeking.
+ * [onSeekFinished]. If the gesture is cancelled, [onSeekCancelled] is called
+ * instead so the parent can drop its preview without seeking.
  */
 @Composable
 fun GradientSeekBar(
@@ -433,7 +217,6 @@ fun GradientSeekBar(
     onSeekFinished: () -> Unit,
     onSeekCancelled: () -> Unit = {},
     modifier: Modifier = Modifier,
-    active: Boolean = true,
 ) {
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableFloatStateOf(progress) }
@@ -465,51 +248,6 @@ fun GradientSeekBar(
         label = "seekProgress",
     )
 
-    // The global aurora clock — read in the draw phase below so the whole
-    // bar breathes with the app without recomposing. Quantized twin: the
-    // bar's hue reads only need ~8 changes a second, not display rate.
-    val aurora = LocalAuroraColorPhase.current
-
-    // Ambient ribbon drift — the silk field floats whether or not music plays.
-    val ribbonDrift = rememberInfiniteTransition(label = "seekRibbons")
-    val ribbonPhase by ribbonDrift.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(RibbonDriftDurationMs, easing = LinearEasing),
-        ),
-        label = "seekRibbonPhase",
-    )
-
-    // Flowing aurora + breathing halo, only while music is playing.
-    val phase: Float
-    val breath: Float
-    if (active) {
-        val infinite = rememberInfiniteTransition(label = "seekGlow")
-        val p by infinite.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(AuroraFlowDurationMs, easing = LinearEasing),
-            ),
-            label = "seekPhase",
-        )
-        val b by infinite.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 1500, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "seekBreath",
-        )
-        phase = p
-        breath = b
-    } else {
-        phase = 0f
-        breath = 0f
-    }
-
     // The bead pops up a little while being touched/dragged.
     val thumbScale by animateFloatAsState(
         targetValue = if (dragging) 1.6f else 1f,
@@ -519,6 +257,8 @@ fun GradientSeekBar(
         ),
         label = "seekThumbScale",
     )
+
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
 
     BoxWithConstraints(
         modifier = modifier
@@ -562,139 +302,49 @@ fun GradientSeekBar(
     ) {
         val maxW = maxWidth
 
-        // Ribbons + track + fill, drawn on a canvas so everything animates
-        // every frame without recomposing.
+        // Track + fill, drawn on a canvas (no per-frame glow).
         Canvas(
             Modifier.matchParentSize(),
         ) {
-            val barHeight = 6.dp.toPx()
+            val barHeight = 4.dp.toPx()
             val corner = CornerRadius(barHeight / 2f, barHeight / 2f)
             val barTop = (size.height - barHeight) / 2f
             val fillWidth = size.width * display
-            val hue = aurora.value
 
-            // ---- The silk tail: streams from the thumb bead ----
-            // Anchored at the bead and stretching back over EXACTLY the
-            // played portion of the track: the ribbon's head rides on the
-            // bead and its length equals the played progress, growing with
-            // playback (bead → bar start). Clipped to the bar bounds so the
-            // loose threads never spill past the track's start. Drawn before
-            // the bar so the bead and fill thread over it.
-            if (fillWidth > 1f) {
-                clipRect {
-                    drawSilkTail(
-                        headX = fillWidth,
-                        baseY = barTop + barHeight / 2f,
-                        amplitude = 13.dp.toPx(),
-                        headThickness = 4.5.dp.toPx(),
-                        tailLength = fillWidth,
-                        wavePhase = ribbonPhase,
-                        wavelength = size.width / 2.4f,
-                        hue = hue,
-                    )
-                }
-            }
-
-            // ---- Track + flowing aurora fill ----
+            // ---- Track ----
             drawRoundRect(
-                color = Color(0x26FFFFFF),
+                color = trackColor,
                 topLeft = Offset(0f, barTop),
                 size = Size(size.width, barHeight),
                 cornerRadius = corner,
             )
+
+            // ---- Red fill (same-hue gradient: deep → bright toward playhead) ----
             if (fillWidth > 0f) {
-                val brush = if (active) {
-                    flowingAuroraBrush(size.width, phase, size.height, hue)
-                } else {
-                    // Paused: the hues still drift slowly with the clock.
-                    auroraBrushAt(hue, size)
-                }
                 drawRoundRect(
-                    brush = brush,
+                    brush = accentHorizontalGradientBrush(fillWidth),
                     topLeft = Offset(0f, barTop),
                     size = Size(fillWidth, barHeight),
                     cornerRadius = corner,
                 )
             }
-
-            // ---- Breathing halo — an expanding, fading aurora ring ----
-            // behind the bead (drawn here so it animates in the draw phase).
-            if (active) {
-                val haloScale = thumbScale * (1f + breath * 1.2f)
-                drawCircle(
-                    color = auroraColorAt(hue).copy(alpha = 0.3f * (1f - breath)),
-                    radius = 6.dp.toPx() * haloScale,
-                    center = Offset(fillWidth, size.height / 2f),
-                )
-            }
         }
 
-        // Thumb — an aurora bead as thick as the bar, ringed in white so it
-        // reads over both track and fill; pops up while dragged. The offset
-        // lambda reads `display` in the PLACEMENT phase: the 500 ms glide
-        // re-places the bead without recomposing this content at all.
+        // Thumb — a flat red bead ringed in the surface color so it reads over
+        // both track and fill; pops up while dragged. The offset lambda reads
+        // `display` in the PLACEMENT phase: the 500 ms glide re-places the bead
+        // without recomposing this content at all.
         Box(
             Modifier
-                .offset { IntOffset(((maxW.toPx() * display) - 3.dp.toPx()).roundToInt(), 0) }
-                .size(6.dp)
+                .offset { IntOffset(((maxW.toPx() * display) - 5.dp.toPx()).roundToInt(), 0) }
+                .size(10.dp)
                 .align(Alignment.CenterStart)
                 .graphicsLayer {
                     scaleX = thumbScale
                     scaleY = thumbScale
                 }
-                .shadow(
-                    elevation = 6.dp,
-                    shape = CircleShape,
-                    ambientColor = Color(0x40000000),
-                    spotColor = Color(0x40000000),
-                )
                 .clip(CircleShape)
-                .auroraFill(CircleShape)
-                .border(1.dp, Color.White.copy(alpha = 0.85f), CircleShape),
-        )
-    }
-}
-
-/**
- * Immersive backdrop shared by the Now Playing and Lyrics screens: the album
- * cover blurred and dimmed, over a vertical dark scrim, with a faint living
- * aurora mist drifting on top so even the immersive screens keep breathing
- * with the rest of the app.
- */
-@Composable
-fun BlurredCoverBackdrop(cover: String?) {
-    Box(Modifier.fillMaxSize()) {
-        // Modifier.blur is a no-op below API 31 (no RenderEffect): a sharp
-        // full-bleed cover would fight every text on the screen, so on old
-        // devices the backdrop degrades to scrim + aurora only.
-        val blurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-        if (cover != null && blurSupported) {
-            AsyncImage(
-                model = cover,
-                contentDescription = null,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .blur(60.dp)
-                    .alpha(0.4f),
-                contentScale = ContentScale.Crop,
-            )
-        }
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color(0x33000000), AppGradients.ScrimDark),
-                    ),
-                ),
-        )
-        // No base gradient here — only the soft drifting curtains and stars,
-        // laid gently over the scrim.
-        AuroraSky(
-            dark = true,
-            intensity = 0.55f,
-            base = false,
-            modifier = Modifier.fillMaxSize(),
+                .accentFill(),
         )
     }
 }
@@ -707,12 +357,11 @@ fun BlurredCoverBackdrop(cover: String?) {
  * confirms it, so the bar never rubber-bands back).
  *
  * Self-collects [PlayerController.positionMs]: the 2 Hz tick recomposes THIS
- * component only — the parent screen passes just [isPlaying]/[durationMs]
- * (which change rarely), so no whole-screen recomposition per tick.
+ * component only — the parent screen passes just [durationMs] (which changes
+ * rarely), so no whole-screen recomposition per tick.
  */
 @Composable
 fun PlayerSeekBar(
-    isPlaying: Boolean,
     durationMs: Long,
     modifier: Modifier = Modifier,
 ) {
@@ -731,45 +380,50 @@ fun PlayerSeekBar(
                 sliderPos = null
             },
             onSeekCancelled = { sliderPos = null },
-            active = isPlaying,
             modifier = Modifier.fillMaxWidth(),
         )
         Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-            Text(formatMs(displayPosMs), style = MaterialTheme.typography.labelSmall, color = White70)
+            Text(
+                formatMs(displayPosMs),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.weight(1f))
-            Text(formatMs(durationMs), style = MaterialTheme.typography.labelSmall, color = White70)
+            Text(
+                formatMs(durationMs),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
 
 /**
- * Circular glassy icon button used on the immersive (dark) player screens.
- * When [accent] is true the icon is tinted with the living aurora accent —
- * resolved *inside* this button so the per-frame aurora read only ever
- * recomposes this small leaf, never the caller's screen.
+ * Clean circular icon button used on the light player / lyric screens. When
+ * [accent] is true the icon is tinted with the flat brand red.
  */
 @Composable
 fun GlassIconButton(
     onClick: () -> Unit,
     icon: ImageVector,
     contentDescription: String,
-    tint: Color = White70,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
     size: Dp = 48.dp,
     accent: Boolean = false,
 ) {
-    val accentColor = if (accent) auroraAccent() else tint
+    val accentTint = if (accent) accentColor() else tint
     Box(
         Modifier
             .size(size)
             .clip(CircleShape)
-            .background(Color(0x1FFFFFFF))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             icon,
             contentDescription = contentDescription,
-            tint = if (accent) accentColor else tint,
+            tint = if (accent) accentTint else tint,
             modifier = Modifier.size(size * 0.55f),
         )
     }
@@ -790,6 +444,19 @@ fun EmptyHint(text: String, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * A [LazyListState] whose scroll position survives the list leaving
+ * composition: navigating to the player, switching tabs, or closing and
+ * reopening the queue sheet then restores where the user was instead of
+ * snapping back to the top. [LazyListState.Saver] persists the first visible
+ * item index + pixel offset through the surrounding saved-state registry
+ * (the NavBackStackEntry for a destination) across recomposition and process
+ * death.
+ */
+@Composable
+fun rememberSaveableLazyListState(): LazyListState =
+    rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+
 /** Track row used by library screens (favorites / playlist detail), styled as a card. */
 @Composable
 fun TrackRow(
@@ -802,8 +469,8 @@ fun TrackRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 5.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,

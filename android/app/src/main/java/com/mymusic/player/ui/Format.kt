@@ -24,3 +24,13 @@ fun formatPlayCount(play: Long?): String {
         p.toString()
     }
 }
+
+/**
+ * Collapse a preference-label list into a one-line summary: up to [max] labels
+ * joined with " · ", followed by " 等 N 项" when there are more. Shared by the
+ * collapsed settings preference card and the recommendation header.
+ */
+fun summarizeLabels(labels: List<String>, max: Int = 4): String {
+    val shown = labels.take(max).joinToString(" · ")
+    return if (labels.size > max) "$shown 等 ${labels.size} 项" else shown
+}

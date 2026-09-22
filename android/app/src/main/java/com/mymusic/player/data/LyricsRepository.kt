@@ -61,9 +61,18 @@ class LyricsRepository(
     }
 
     private suspend fun fromBilibili(track: Track): Lyrics? {
-        // Prefer the cid resolved for this track's own 分P (multi-P videos
-        // have per-page subtitles); fall back to the video's page-1 cid.
-        val cid = track.cid ?: api.videoInfo(track.bvid).cid ?: return null
+        // Prefer the cid resolved for this track's own 分P (multi-P videos have
+        // per-page subtitles). When it's missing, resolve the page's own cid and
+        // fall back to the video's page-1 cid — mirroring TrackRepository's
+        // per-page resolution so a page > 1 track never gets page 1's subtitles.
+        val cid = track.cid ?: run {
+            val info = api.videoInfo(track.bvid)
+            if (track.page > 1) {
+                info.pages.firstOrNull { it.page == track.page }?.cid
+            } else {
+                info.cid ?: info.pages.firstOrNull()?.cid
+            }
+        } ?: return null
         val subs = api.subtitleList(track.bvid, cid)
         if (subs.isEmpty()) return null
         // Prefer human Chinese subtitles, then AI Chinese, then anything else.

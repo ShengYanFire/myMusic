@@ -64,6 +64,10 @@ object BiliIdentity {
             if (part.isEmpty()) return@forEach
             val key = part.substringBefore('=', "").trim()
             if (key.equals(BUVID3, ignoreCase = true)) return@forEach
+            // Stay in lock-step with loginIdentityCookies: only known login keys
+            // reach the wire, so a legacy/pasted cookie carrying extra keys can't
+            // leak them onto api.bilibili.com.
+            if (key.lowercase(Locale.ROOT) !in LOGIN_COOKIES) return@forEach
             add(part)
         }
     }.joinToString("; ")

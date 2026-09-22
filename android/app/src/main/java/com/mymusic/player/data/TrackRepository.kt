@@ -155,7 +155,7 @@ class TrackRepository(
     }
 
     /** Resolve the direct audio-stream URL for a track (no collection info). */
-    suspend fun resolveAudio(track: Track): Track = resolveAudioWithSeason(track).track
+    private suspend fun resolveAudio(track: Track): Track = resolveAudioWithSeason(track).track
 
     /**
      * Resolve the direct audio-stream URL with the FEWEST B站 calls: when the

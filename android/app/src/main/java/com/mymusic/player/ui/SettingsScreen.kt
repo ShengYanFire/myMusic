@@ -57,8 +57,8 @@ import androidx.compose.ui.unit.dp
 import com.mymusic.player.data.AppSettings
 import com.mymusic.player.domain.MusicGenres
 import com.mymusic.player.domain.MusicMoods
-import com.mymusic.player.ui.theme.AuroraText
-import com.mymusic.player.ui.theme.auroraFill
+import com.mymusic.player.ui.theme.AccentText
+import com.mymusic.player.ui.theme.accentFill
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -107,7 +107,7 @@ fun SettingsScreen(
                         Modifier
                             .size(16.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF34D399)),
+                            .background(Color(0xFF16A34A)),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -240,7 +240,6 @@ fun SettingsScreen(
                     }
                 },
                 enabled = !testing,
-                phaseOffset = 0.33f,
                 modifier = Modifier.fillMaxWidth(),
             )
             if (testing) {
@@ -260,7 +259,7 @@ fun SettingsScreen(
                 Text(
                     if (ok) "B 站连接正常" else "无法连接 B 站",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (ok) Color(0xFF34D399) else MaterialTheme.colorScheme.error,
+                    color = if (ok) Color(0xFF16A34A) else MaterialTheme.colorScheme.error,
                 )
             }
         }
@@ -292,7 +291,7 @@ private fun SettingCard(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(22.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -300,7 +299,7 @@ private fun SettingCard(
                 Modifier
                     .size(30.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .auroraFill(RoundedCornerShape(10.dp)),
+                    .accentFill(),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -331,10 +330,10 @@ private fun QualityOption(
             .clip(shape)
             .then(
                 if (selected) {
-                    Modifier.auroraFill(shape)
+                    Modifier.accentFill()
                 } else {
                     Modifier.background(
-                        SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                        SolidColor(MaterialTheme.colorScheme.surfaceContainerHigh),
                     )
                 },
             )
@@ -377,7 +376,7 @@ private fun CollapsiblePreferenceCard(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(22.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .animateContentSize()
             .padding(16.dp),
     ) {
@@ -393,7 +392,7 @@ private fun CollapsiblePreferenceCard(
                 Modifier
                     .size(30.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .auroraFill(RoundedCornerShape(10.dp)),
+                    .accentFill(),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -441,7 +440,7 @@ private fun CollapsiblePreferenceCard(
                 }
             }
             Spacer(Modifier.height(10.dp))
-            AuroraText(
+            AccentText(
                 if (selectedIds.isEmpty()) {
                     "尚未设置 · 更改后推荐列表会自动刷新"
                 } else {
@@ -456,9 +455,7 @@ private fun CollapsiblePreferenceCard(
             val summaryText = if (labels.isEmpty()) {
                 "未设置 · 点此展开选择"
             } else {
-                val shown = labels.take(4).joinToString(" · ")
-                val suffix = if (labels.size > 4) " 等 ${labels.size} 项" else ""
-                "已选 ${labels.size} $unitNoun：$shown$suffix"
+                "已选 ${labels.size} $unitNoun：${summarizeLabels(labels)}"
             }
             val summaryModifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
@@ -473,8 +470,8 @@ private fun CollapsiblePreferenceCard(
                     modifier = summaryModifier,
                 )
             } else {
-                // The summary breathes with the aurora.
-                AuroraText(
+                // The summary is tinted with the fixed accent.
+                AccentText(
                     summaryText,
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
@@ -486,7 +483,7 @@ private fun CollapsiblePreferenceCard(
     }
 }
 
-/** Tappable preference pill: living aurora gradient + check mark when selected. */
+/** Tappable preference pill: fixed electric gradient + check mark when selected. */
 @Composable
 private fun PreferenceChip(
     label: String,
@@ -498,10 +495,10 @@ private fun PreferenceChip(
             .clip(RoundedCornerShape(18.dp))
             .then(
                 if (selected) {
-                    Modifier.auroraFill(RoundedCornerShape(18.dp))
+                    Modifier.accentFill()
                 } else {
                     Modifier.background(
-                        SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                        SolidColor(MaterialTheme.colorScheme.surfaceContainerHigh),
                     )
                 },
             )

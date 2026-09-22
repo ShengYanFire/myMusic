@@ -15,6 +15,7 @@ android/assemble.log
 /full-log.txt
 /gfxinfo.txt
 /library.pb.txt
+/build.log
 
 # Built binaries never belong in the repo (a 22 MB tracked APK bloats every
 # clone and every future commit's history)

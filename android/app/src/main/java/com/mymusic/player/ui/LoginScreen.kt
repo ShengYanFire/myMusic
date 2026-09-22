@@ -21,7 +21,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,7 +30,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -72,23 +70,21 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.mymusic.player.network.BiliIdentity
 import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.LocalAuroraColorPhase
-import com.mymusic.player.ui.theme.White70
-import com.mymusic.player.ui.theme.auroraBrushAt
-import com.mymusic.player.ui.theme.auroraFill
+import com.mymusic.player.ui.theme.accentFill
+import com.mymusic.player.ui.theme.accentHorizontalBrush
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Bilibili web login embedded in a WebView, styled to match the app's aurora
+ * Bilibili web login embedded in a WebView, styled to match the app's 炫黑
  * design language:
- *  - a glassy header (back / refresh) floating over the living sky, sealed by
- *    a full-width aurora hairline;
+ *  - a glassy header (back / refresh) floating over the black sky, sealed by
+ *    a full-width electric hairline;
  *  - the passport page in a rounded floating card, with a themed loading
- *    overlay (aurora arc spinner) and a friendly error state with retry;
+ *    overlay (electric arc spinner) and a friendly error state with retry;
  *  - a privacy hint pill at the bottom;
- *  - a brief aurora "登录成功" overlay before the session is saved and the
+ *  - a brief electric "登录成功" overlay before the session is saved and the
  *    screen closes itself.
  *
  * The official passport page supports account+password (with slider captcha),
@@ -191,7 +187,6 @@ fun LoginScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -217,12 +212,12 @@ fun LoginScreen(
                     contentDescription = "刷新",
                 )
             }
-            // Full-width aurora hairline sealing the header.
+            // Neutral hairline sealing the header.
             Box(
                 Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .auroraFill(),
+                    .background(AppGradients.BarDivider),
             )
 
             // ---- The passport page, floating in a rounded card ----
@@ -236,10 +231,10 @@ fun LoginScreen(
                     Modifier
                         .fillMaxSize()
                         .shadow(
-                            elevation = 12.dp,
+                            elevation = 4.dp,
                             shape = RoundedCornerShape(24.dp),
-                            ambientColor = Color(0x4D000000),
-                            spotColor = Color(0x4D000000),
+                            ambientColor = Color(0x1A000000),
+                            spotColor = Color(0x1A000000),
                         )
                         .clip(RoundedCornerShape(24.dp))
                         .background(Color.White)
@@ -266,6 +261,10 @@ fun LoginScreen(
                                     webViewClient = object : WebViewClient() {
                                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                             loading = true
+                                            // A fresh load clears a prior failure, so a
+                                            // successful reload doesn't leave the error
+                                            // overlay covering the loaded page.
+                                            loadFailed = false
                                         }
 
                                         override fun onPageFinished(view: WebView?, url: String?) {
@@ -322,22 +321,22 @@ fun LoginScreen(
                         Box(
                             Modifier
                                 .fillMaxSize()
-                                .background(Color(0x66000000)),
+                                .background(AppGradients.ScrimLight),
                             contentAlignment = Alignment.Center,
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                AuroraSpinner(Modifier.size(46.dp), strokeWidth = 4.dp)
+                                AccentSpinner(Modifier.size(46.dp), strokeWidth = 4.dp)
                                 Spacer(Modifier.height(18.dp))
                                 Text(
                                     "正在加载 B 站登录页…",
                                     style = MaterialTheme.typography.bodyLarge,
-                                    color = Color.White,
+                                    color = MaterialTheme.colorScheme.onSurface,
                                 )
                                 Spacer(Modifier.height(4.dp))
                                 Text(
                                     "首次加载可能较慢，请稍候",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = Color.White.copy(alpha = 0.7f),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -426,11 +425,11 @@ private fun LoginHeaderButton(
 }
 
 /**
- * A rotating arc spinner filled with the living aurora gradient — the
- * loading state breathes with the rest of the app instead of a stock ring.
+ * A rotating arc spinner filled with the FIXED electric gradient — the
+ * loading state feels alive without any color cycling.
  */
 @Composable
-private fun AuroraSpinner(modifier: Modifier = Modifier, strokeWidth: Dp = 4.dp) {
+private fun AccentSpinner(modifier: Modifier = Modifier, strokeWidth: Dp = 4.dp) {
     val infinite = rememberInfiniteTransition(label = "loginSpinner")
     val rotation by infinite.animateFloat(
         initialValue = 0f,
@@ -447,11 +446,9 @@ private fun AuroraSpinner(modifier: Modifier = Modifier, strokeWidth: Dp = 4.dp)
         ),
         label = "sweep",
     )
-    // Color-only consumer → quantized aurora clock (~8 hue updates/s).
-    val aurora = LocalAuroraColorPhase.current
     Canvas(modifier) {
         drawArc(
-            brush = auroraBrushAt(aurora.value, size),
+            brush = accentHorizontalBrush(size.width),
             startAngle = rotation,
             sweepAngle = 360f * sweep,
             useCenter = false,
@@ -460,21 +457,19 @@ private fun AuroraSpinner(modifier: Modifier = Modifier, strokeWidth: Dp = 4.dp)
     }
 }
 
-/** Small glass pill reassuring the user about where the login state lives. */
+/** Small pill reassuring the user about where the login state lives. */
 @Composable
 private fun LoginPrivacyHint() {
-    val dark = isSystemInDarkTheme()
-    val background = if (dark) AppGradients.BarGlass else Color.White.copy(alpha = 0.85f)
     Row(
         Modifier
             .shadow(
-                elevation = 6.dp,
+                elevation = 2.dp,
                 shape = RoundedCornerShape(50),
-                ambientColor = Color(0x33000000),
-                spotColor = Color(0x33000000),
+                ambientColor = Color(0x14000000),
+                spotColor = Color(0x14000000),
             )
             .clip(RoundedCornerShape(50))
-            .background(background)
+            .background(Color.White)
             .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -493,7 +488,7 @@ private fun LoginPrivacyHint() {
     }
 }
 
-/** Full-screen aurora confirmation shown briefly right before closing. */
+/** Full-screen electric confirmation shown briefly right before closing. */
 @Composable
 private fun LoginSuccessOverlay() {
     var appear by remember { mutableStateOf(false) }
@@ -514,7 +509,7 @@ private fun LoginSuccessOverlay() {
     Box(
         Modifier
             .fillMaxSize()
-            .background(AppGradients.ScrimDark)
+            .background(AppGradients.ScrimLight)
             .alpha(fade),
         contentAlignment = Alignment.Center,
     ) {
@@ -535,7 +530,7 @@ private fun LoginSuccessOverlay() {
                         spotColor = Color(0x55000000),
                     )
                     .clip(CircleShape)
-                    .auroraFill(CircleShape),
+                    .accentFill(),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -549,13 +544,13 @@ private fun LoginSuccessOverlay() {
             Text(
                 "登录成功",
                 style = MaterialTheme.typography.headlineSmall,
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(6.dp))
             Text(
                 "已保存登录态，音质更高、更少被风控拦截",
                 style = MaterialTheme.typography.bodySmall,
-                color = White70,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

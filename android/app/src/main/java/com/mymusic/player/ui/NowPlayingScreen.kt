@@ -1,17 +1,8 @@
 package com.mymusic.player.ui
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -28,8 +19,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -62,13 +53,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -84,14 +75,11 @@ import coil.compose.AsyncImage
 import com.mymusic.player.data.Playlist
 import com.mymusic.player.domain.Track
 import com.mymusic.player.player.PlayerController
-import com.mymusic.player.ui.theme.AuroraIcon
-import com.mymusic.player.ui.theme.AuroraText
-import com.mymusic.player.ui.theme.Rose
-import com.mymusic.player.ui.theme.White40
-import com.mymusic.player.ui.theme.White70
-import com.mymusic.player.ui.theme.auroraAccent
-import com.mymusic.player.ui.theme.auroraFill
-import com.mymusic.player.ui.theme.auroraGlow
+import com.mymusic.player.ui.theme.Accent
+import com.mymusic.player.ui.theme.AccentIcon
+import com.mymusic.player.ui.theme.AccentText
+import com.mymusic.player.ui.theme.accentColor
+import com.mymusic.player.ui.theme.accentFill
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -114,6 +102,13 @@ fun NowPlayingScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var showSleepDialog by remember { mutableStateOf(false) }
     var showQueueSheet by remember { mutableStateOf(false) }
+    // The queue sheet's scroll position outlives the sheet itself: it is hoisted
+    // to this screen (and remembered as saveable) so closing/reopening the sheet
+    // — or navigating away and back — restores the previous position instead of
+    // the top. queueAutoScroll brings the playing song into view only on the
+    // very first open, then stays off so the user's own scroll wins afterwards.
+    val queueListState = rememberSaveableLazyListState()
+    var queueAutoScroll by rememberSaveable { mutableStateOf(true) }
 
     if (current == null) {
         EmptyHint(
@@ -123,18 +118,6 @@ fun NowPlayingScreen(
         return
     }
 
-    // Slow vinyl rotation — advances only while playing.
-    val rotation = remember { Animatable(0f) }
-    LaunchedEffect(state.isPlaying) {
-        if (state.isPlaying) {
-            while (true) {
-                val from = rotation.value % 360f
-                rotation.snapTo(from)
-                rotation.animateTo(from + 360f, animationSpec = tween(20000, easing = LinearEasing))
-            }
-        }
-    }
-
     // ---- Whole-page swipe up/down to switch tracks ----
     // The user drags anywhere on the page vertically; past the threshold the
     // current song is skipped (up = next, down = previous) and the page
@@ -142,21 +125,16 @@ fun NowPlayingScreen(
     val density = LocalDensity.current
     val swipeThresholdPx = with(density) { 90.dp.toPx() }
     val hintThresholdPx = with(density) { 24.dp.toPx() }
-    var discDrag by remember { mutableStateOf(0f) }
+    var swipeDrag by remember { mutableStateOf(0f) }
     var trackSwitching by remember { mutableStateOf(false) }
-    var swipeUp by remember { mutableStateOf(true) }
     // Follows the finger while dragging; springs back to 0 on release/switch.
-    val discOffset by animateFloatAsState(
-        targetValue = discDrag,
+    val contentOffset by animateFloatAsState(
+        targetValue = swipeDrag,
         animationSpec = tween(160),
-        label = "discOffset",
+        label = "swipeOffset",
     )
 
     // Skip to the next/previous song, with a snackbar when the queue ends.
-    // The bounds check runs SYNCHRONOUSLY against the visible queue (the
-    // old delay-then-inspect race mis-toasted "已经是最后一首了" while the
-    // switch was merely still resolving), with the async check kept only as
-    // a no-op fallback.
     fun switchTrack(goNext: Boolean) {
         // uid (not bvid): switching between 分P of one video IS a track switch.
         val beforeUid = state.current?.uid
@@ -174,7 +152,7 @@ fun NowPlayingScreen(
         // on-demand 下一首 resolution in progress means the switch IS coming.
         // Under shuffle the logical index says nothing about the end of the
         // random round, so this fast path is skipped and the async fallback
-        // (which observes whether the track actually changed) alone decides.
+        // alone decides.
         val q = state.queue
         val idx = state.queueIndex
         val wraps = repeatMode == Player.REPEAT_MODE_ALL
@@ -185,8 +163,6 @@ fun NowPlayingScreen(
                     announce("已经是最后一首了")
                 }
             } else {
-                // playPrevious restarts the current song once it is a few seconds
-                // in — that is not "no previous".
                 if (idx <= 0 && beforePosMs <= 3_000) {
                     announce("已经是第一首了")
                 }
@@ -216,20 +192,20 @@ fun NowPlayingScreen(
     Box(
         Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface)
             .pointerInput(Unit) {
                 detectVerticalDragGestures(
-                    onDragEnd = { discDrag = 0f },
-                    onDragCancel = { discDrag = 0f },
+                    onDragEnd = { swipeDrag = 0f },
+                    onDragCancel = { swipeDrag = 0f },
                 ) { change, dragAmount ->
                     change.consume()
                     if (!trackSwitching) {
-                        discDrag = (discDrag + dragAmount)
+                        swipeDrag = (swipeDrag + dragAmount)
                             .coerceIn(-swipeThresholdPx * 1.4f, swipeThresholdPx * 1.4f)
-                        if (abs(discDrag) >= swipeThresholdPx) {
-                            val goNext = discDrag < 0f
-                            swipeUp = goNext
+                        if (abs(swipeDrag) >= swipeThresholdPx) {
+                            val goNext = swipeDrag < 0f
                             trackSwitching = true
-                            discDrag = 0f
+                            swipeDrag = 0f
                             switchTrack(goNext)
                             scope.launch {
                                 delay(420)
@@ -240,9 +216,6 @@ fun NowPlayingScreen(
                 }
             },
     ) {
-        // ---- Immersive blurred cover backdrop ----
-        BlurredCoverBackdrop(current.cover)
-
         Box(
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -253,100 +226,32 @@ fun NowPlayingScreen(
                     // content block slides up/down and fades slightly, then
                     // springs back (or the track changes).
                     .graphicsLayer {
-                        translationY = discOffset * 0.35f
-                        alpha = (1f - abs(discOffset) / swipeThresholdPx * 0.4f)
+                        translationY = contentOffset * 0.35f
+                        alpha = (1f - abs(contentOffset) / swipeThresholdPx * 0.4f)
                             .coerceIn(0.6f, 1f)
                     }
-                    .padding(horizontal = 22.dp, vertical = 20.dp),
+                    .padding(horizontal = 22.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
                 // ---- Eyebrow marker ----
                 EyebrowLabel()
 
+                Spacer(Modifier.height(12.dp))
+
+                // ---- Album artwork (tap the cover to open lyrics) ----
+                CoverArtwork(
+                    cover = current.cover,
+                    onClick = onOpenLyrics,
+                )
+
                 Spacer(Modifier.height(16.dp))
-
-                // ---- Rotating vinyl disc (tap to open the lyrics page) ----
-                // Swiping anywhere on the page (including the album art) is
-                // handled by the root Box's vertical drag detector.
-                Box(
-                    Modifier
-                        .size(270.dp)
-                        .clickable(onClick = onOpenLyrics),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    // Soft living aurora glow behind the disc — the hue
-                    // drifts around the spectrum with the whole app.
-                    Box(
-                        Modifier
-                            .size(330.dp)
-                            .auroraGlow(alpha = 0.32f),
-                    )
-                    // Disc: dark vinyl body + etched grooves + rotating cover.
-                    Box(
-                        Modifier
-                            .size(250.dp)
-                            .graphicsLayer { rotationZ = rotation.value }
-                            .clip(CircleShape)
-                            .background(Color(0xFF0A1A20)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        // Vinyl grooves etched into the rim ring, rotating
-                        // with the disc for a realistic record.
-                        VinylGrooves()
-                        // Cover slides in from the direction the disc was
-                        // swiped when the track changes.
-                        AnimatedContent(
-                            targetState = current.uid,
-                            transitionSpec = {
-                                val enter = slideInVertically(tween(280)) {
-                                    if (swipeUp) it / 5 else -it / 5
-                                } + fadeIn(tween(280))
-                                enter.togetherWith(fadeOut(tween(160)))
-                            },
-                            label = "cover",
-                        ) {
-                            AsyncImage(
-                                model = current.cover,
-                                contentDescription = "查看歌词",
-                                modifier = Modifier
-                                    .size(196.dp)
-                                    .clip(CircleShape),
-                                contentScale = ContentScale.Crop,
-                            )
-                        }
-                    }
-                    // Static ring over the cover edge.
-                    Box(
-                        Modifier
-                            .size(196.dp)
-                            .border(1.dp, Color(0x26FFFFFF), CircleShape),
-                    )
-                    // Center spindle.
-                    Box(
-                        Modifier
-                            .size(62.dp)
-                            .shadow(8.dp, CircleShape)
-                            .clip(CircleShape)
-                            .auroraFill(CircleShape),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(Color(0x60000000)),
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(24.dp))
 
                 // ---- Title / artist ----
                 Text(
                     current.title,
                     style = MaterialTheme.typography.headlineMedium,
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onSurface,
                     textAlign = TextAlign.Center,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -355,7 +260,7 @@ fun NowPlayingScreen(
                 Text(
                     current.author ?: "未知作者",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = White70,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -372,90 +277,35 @@ fun NowPlayingScreen(
                 }
 
                 // Status line leaf: the retry/resolve/buffering hints change on
-                // their own cadence — isolating them here (instead of four
-                // inline ifs) lets the surrounding screen skip while only this
-                // small block recomposes.
+                // their own cadence — isolating them here lets the surrounding
+                // screen skip while only this small block recomposes.
                 PlayerStatusLine(
                     retrying = state.retrying,
                     loadingNextUid = state.loadingNextUid,
                     buffering = state.buffering,
                 )
 
-                Spacer(Modifier.height(20.dp))
-
-                // ---- Gradient seek bar (flowing aurora while playing) ----
-                PlayerSeekBar(isPlaying = state.isPlaying, durationMs = state.durationMs)
-
                 Spacer(Modifier.height(16.dp))
 
-                // ---- Transport: shuffle · prev · play · next · repeat ----
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    GlassIconButton(
-                        onClick = { PlayerController.toggleShuffle() },
-                        icon = Icons.Filled.Shuffle,
-                        contentDescription = if (shuffleEnabled) "关闭随机播放" else "随机播放",
-                        tint = White40,
-                        accent = shuffleEnabled,
-                        size = 44.dp,
-                    )
-                    GlassIconButton(
-                        onClick = { PlayerController.playPrevious() },
-                        icon = Icons.Filled.SkipPrevious,
-                        contentDescription = "上一首",
-                        size = 54.dp,
-                    )
-                    Box(
-                        Modifier
-                            .size(80.dp)
-                            .shadow(
-                                elevation = 16.dp,
-                                shape = CircleShape,
-                                ambientColor = Color(0x4D000000),
-                                spotColor = Color(0x4D000000),
-                            )
-                            .clip(CircleShape)
-                            .auroraFill(CircleShape)
-                            .clickable { PlayerController.togglePlayPause() },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = if (state.isPlaying) "暂停" else "播放",
-                            tint = Color.White,
-                            modifier = Modifier.size(42.dp),
-                        )
-                    }
-                    GlassIconButton(
-                        onClick = { PlayerController.playNext() },
-                        icon = Icons.Filled.SkipNext,
-                        contentDescription = "下一首",
-                        size = 54.dp,
-                    )
-                    GlassIconButton(
-                        onClick = { PlayerController.cycleRepeatMode() },
-                        icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
-                            Icons.Filled.RepeatOne
-                        } else {
-                            Icons.Filled.Repeat
-                        },
-                        contentDescription = when (repeatMode) {
-                            Player.REPEAT_MODE_ONE -> "单曲循环"
-                            Player.REPEAT_MODE_ALL -> "列表循环"
-                            else -> "顺序播放"
-                        },
-                        tint = White40,
-                        accent = repeatMode > 0,
-                        size = 44.dp,
-                    )
-                }
+                // ---- Seek bar ----
+                PlayerSeekBar(durationMs = state.durationMs)
+
+                Spacer(Modifier.height(12.dp))
+
+                // ---- 播放模式 (grouped mode toggles): shuffle · repeat ----
+                ModeToggleCluster(
+                    shuffleEnabled = shuffleEnabled,
+                    repeatMode = repeatMode,
+                )
 
                 Spacer(Modifier.height(10.dp))
 
-                // ---- Secondary: favorite · playlist · queue · sleep ----
+                // ---- 主控制 (primary transport): previous · play · next ----
+                TransportControls(isPlaying = state.isPlaying)
+
+                Spacer(Modifier.height(10.dp))
+
+                // ---- 更多操作 (secondary actions): favorite · playlist · queue · sleep ----
                 // uid (not bvid): a specific 分P is favorited, not the video.
                 val isFavorite = favorites.any { it.uid == current.uid }
                 Row(
@@ -466,7 +316,7 @@ fun NowPlayingScreen(
                         onClick = { scope.launch { vm.toggleFavorite(current) } },
                         icon = if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                         label = "收藏",
-                        tint = if (isFavorite) Rose else White70,
+                        accent = isFavorite,
                     )
                     LabeledIconButton(
                         onClick = { showPlaylistDialog = true },
@@ -486,7 +336,7 @@ fun NowPlayingScreen(
                         contentDescription = "定时停止播放",
                     )
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
             }
         }
 
@@ -495,14 +345,14 @@ fun NowPlayingScreen(
         // when the threshold is CROSSED, not every drag frame), and the label
         // itself is an isolated leaf: while dragging, only this hint redraws.
         val showHint by remember {
-            derivedStateOf { abs(discOffset) > hintThresholdPx && !trackSwitching }
+            derivedStateOf { abs(contentOffset) > hintThresholdPx && !trackSwitching }
         }
         Box(
             Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center,
         ) {
             if (showHint) {
-                SwipeDirectionHint(discOffset)
+                SwipeDirectionHint(contentOffset)
             }
         }
     }
@@ -517,8 +367,6 @@ fun NowPlayingScreen(
             },
             onPick = { id ->
                 scope.launch {
-                    // Boolean result: false means the song was ALREADY in the
-                    // list — keep the picker open so the user picks another.
                     val added = vm.addToPlaylist(id, current)
                     if (added) {
                         vm.showMessage("已加入歌单")
@@ -562,16 +410,13 @@ fun NowPlayingScreen(
 
     if (showQueueSheet) {
         QueueSheet(
+            listState = queueListState,
+            autoScrollToCurrent = queueAutoScroll,
+            onAutoScrollConsumed = { queueAutoScroll = false },
             onDismiss = { showQueueSheet = false },
             onPlay = { index, track ->
                 showQueueSheet = false
-                // Entries already loaded in the player jump instantly (a pure
-                // seek); ones still resolving go through resolve-and-play —
-                // through requestPlay, so the resolution is cancellable and
-                // the row spinner reflects it.
                 if (!PlayerController.skipTo(track.uid)) {
-                    // Keep the queue as displayed — never re-expand the tapped
-                    // entry into its 合集/分P here.
                     vm.requestPlay(state.queue, index, useListAsQueue = true) {}
                 }
             },
@@ -579,10 +424,149 @@ fun NowPlayingScreen(
     }
 }
 
+/** Static rounded-square album artwork (tap to open lyrics), like 网易云. */
+@Composable
+private fun CoverArtwork(
+    cover: String?,
+    onClick: () -> Unit,
+) {
+    AsyncImage(
+        model = cover,
+        contentDescription = "查看歌词",
+        modifier = Modifier
+            .size(236.dp)
+            .shadow(8.dp, RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(24.dp))
+            .clickable(onClick = onClick),
+        contentScale = ContentScale.Crop,
+    )
+}
+
 /**
- * Small "正在播放" eyebrow label above the disc — a calm, letter-spaced
- * marker with a living aurora dot, giving the page a clear focal point.
+ * Grouped playback-mode toggles (随机 / 循环) in one neutral capsule. Each
+ * toggle is tinted with the flat brand red when active.
  */
+@Composable
+private fun ModeToggleCluster(shuffleEnabled: Boolean, repeatMode: Int) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ModeToggleItem(
+            icon = Icons.Filled.Shuffle,
+            label = if (shuffleEnabled) "随机开" else "随机",
+            active = shuffleEnabled,
+            contentDescription = if (shuffleEnabled) "关闭随机播放" else "随机播放",
+            onClick = { PlayerController.toggleShuffle() },
+        )
+        Box(
+            Modifier
+                .width(1.dp)
+                .height(16.dp)
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+        )
+        ModeToggleItem(
+            icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
+                Icons.Filled.RepeatOne
+            } else {
+                Icons.Filled.Repeat
+            },
+            label = when (repeatMode) {
+                Player.REPEAT_MODE_ONE -> "单曲循环"
+                Player.REPEAT_MODE_ALL -> "列表循环"
+                else -> "顺序"
+            },
+            active = repeatMode > 0,
+            contentDescription = when (repeatMode) {
+                Player.REPEAT_MODE_ONE -> "单曲循环"
+                Player.REPEAT_MODE_ALL -> "列表循环"
+                else -> "顺序播放"
+            },
+            onClick = { PlayerController.cycleRepeatMode() },
+        )
+    }
+}
+
+/** One toggle inside [ModeToggleCluster]: icon + label, red-colored when on. */
+@Composable
+private fun ModeToggleItem(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    val color = if (active) accentColor() else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = color,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = color,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * Primary transport cluster: previous · play/pause · next, centered with the
+ * big red play button as the single focal point.
+ */
+@Composable
+private fun TransportControls(isPlaying: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        GlassIconButton(
+            onClick = { PlayerController.playPrevious() },
+            icon = Icons.Filled.SkipPrevious,
+            contentDescription = "上一首",
+            size = 52.dp,
+        )
+        Spacer(Modifier.width(28.dp))
+        Box(
+            Modifier
+                .size(72.dp)
+                .clip(CircleShape)
+                .accentFill()
+                .clickable { PlayerController.togglePlayPause() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (isPlaying) "暂停" else "播放",
+                tint = Color.White,
+                modifier = Modifier.size(38.dp),
+            )
+        }
+        Spacer(Modifier.width(28.dp))
+        GlassIconButton(
+            onClick = { PlayerController.playNext() },
+            icon = Icons.Filled.SkipNext,
+            contentDescription = "下一首",
+            size = 52.dp,
+        )
+    }
+}
+
+/** Small "正在播放" eyebrow label above the cover: a red dot + letter-spaced gray. */
 @Composable
 private fun EyebrowLabel() {
     Row(
@@ -593,89 +577,54 @@ private fun EyebrowLabel() {
             Modifier
                 .size(6.dp)
                 .clip(CircleShape)
-                .auroraFill(CircleShape),
+                .background(Accent),
         )
         Spacer(Modifier.width(8.dp))
         Text(
             "正在播放",
             style = MaterialTheme.typography.labelMedium,
-            color = White70,
-            letterSpacing = 4.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            letterSpacing = 3.sp,
         )
     }
 }
 
 /**
- * Concentric vinyl grooves etched into the disc's rim ring. They live inside
- * the rotating disc so the whole record spins as one — the grooves read as
- * the outer LP ring while the cover acts as the center label.
- */
-@Composable
-private fun VinylGrooves() {
-    Canvas(Modifier.fillMaxSize()) {
-        val r = size.minDimension / 2f
-        // Grooves sit between the cover edge (~0.78r) and the disc rim.
-        val inner = r * 0.79f
-        val outer = r * 0.965f
-        val steps = 12
-        for (i in 0 until steps) {
-            val t = i / (steps - 1f)
-            val radius = inner + (outer - inner) * t
-            val alpha = 0.12f - 0.08f * t
-            drawCircle(
-                color = Color.White.copy(alpha = alpha),
-                radius = radius,
-                center = center,
-                style = Stroke(width = 1.dp.toPx()),
-            )
-        }
-        // A hairline where the grooves meet the cover label.
-        drawCircle(
-            color = Color.White.copy(alpha = 0.14f),
-            radius = inner,
-            center = center,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-    }
-}
-
-/**
- * Glassy icon button with a caption underneath — the clean, labeled
- * secondary-action cluster (收藏 / 歌单 / 队列 / 定时). When [accent] is set the
- * icon and caption both breathe with the aurora (scoped to this leaf).
+ * Icon button with a caption underneath — the clean, labeled secondary action
+ * cluster (收藏 / 歌单 / 队列 / 定时). When [accent] is set the icon and caption
+ * both use the flat brand red.
  */
 @Composable
 private fun LabeledIconButton(
     onClick: () -> Unit,
     icon: ImageVector,
     label: String,
-    tint: Color = White70,
     accent: Boolean = false,
     contentDescription: String? = null,
 ) {
-    val color = if (accent) auroraAccent() else tint
+    val color = if (accent) accentColor() else MaterialTheme.colorScheme.onSurfaceVariant
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 10.dp, vertical = 2.dp),
     ) {
         Box(
             Modifier
-                .size(44.dp)
+                .size(42.dp)
                 .clip(CircleShape)
-                .background(Color(0x1FFFFFFF)),
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 icon,
                 contentDescription = contentDescription ?: label,
                 tint = color,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(21.dp),
             )
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(3.dp))
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
@@ -688,15 +637,15 @@ private fun LabeledIconButton(
 /** "上滑 · 下一首 / 下滑 · 上一首" pill — isolated so per-frame drag updates
  *  only recompose this leaf. */
 @Composable
-private fun SwipeDirectionHint(discOffset: Float) {
+private fun SwipeDirectionHint(swipeDrag: Float) {
     Text(
-        if (discOffset < 0f) "上滑 · 下一首" else "下滑 · 上一首",
+        if (swipeDrag < 0f) "上滑 · 下一首" else "下滑 · 上一首",
         style = MaterialTheme.typography.titleSmall,
-        color = Color.White,
+        color = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier
-            .shadow(6.dp, RoundedCornerShape(18.dp))
-            .clip(RoundedCornerShape(18.dp))
-            .background(Color(0x73000000))
+            .shadow(4.dp, RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surface)
             .padding(horizontal = 14.dp, vertical = 7.dp),
     )
 }
@@ -707,24 +656,23 @@ private fun SwipeDirectionHint(discOffset: Float) {
  * lines react to their own fields.
  */
 @Composable
-private fun PlayerStatusLine(    retrying: Boolean,
+private fun PlayerStatusLine(
+    retrying: Boolean,
     loadingNextUid: String?,
     buffering: Boolean,
 ) {
-    val message: Pair<String, Color>? = when {
-        retrying -> "正在切换音源…" to Color(0xFFFFC96B)
-        loadingNextUid != null -> "正在解析下一首…" to Color(0xFF7EC8FF)
-        // The seek already happened and the player wants to play, but the
-        // audio stream is still loading from the CDN.
-        buffering -> "缓冲中…" to Color(0xFF7EC8FF)
+    val message: String? = when {
+        retrying -> "正在切换音源…"
+        loadingNextUid != null -> "正在解析下一首…"
+        buffering -> "缓冲中…"
         else -> null
     }
-    message?.let { (text, color) ->
-        Spacer(Modifier.height(10.dp))
+    message?.let { text ->
+        Spacer(Modifier.height(8.dp))
         Text(
             text,
             style = MaterialTheme.typography.bodySmall,
-            color = color,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
     }
@@ -733,26 +681,30 @@ private fun PlayerStatusLine(    retrying: Boolean,
 /**
  * 正在播放列表: the current play queue in a bottom sheet — the whole list
  * behind the playing song, including entries whose audio is still being
- * resolved in the background. The playing entry is aurora-highlighted and
+ * resolved in the background. The playing entry is accent-highlighted and
  * the sheet opens with it in view; tapping an entry jumps to it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QueueSheet(
+    listState: LazyListState,
+    autoScrollToCurrent: Boolean,
+    onAutoScrollConsumed: () -> Unit,
     onDismiss: () -> Unit,
     onPlay: (Int, Track) -> Unit,
 ) {
-    // The sheet collects the player state ITSELF: while the background queue
-    // fill re-emits the queue, only this (currently open) sheet recomposes —
-    // not the whole Now Playing screen behind it.
     val state by PlayerController.state.collectAsState()
     val queue = state.queue
     val queueIndex = state.queueIndex
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val listState = rememberLazyListState()
-    // Open with the playing entry in view (a few rows of context above it).
+    // First open: bring the playing song into view (3 songs of context above).
+    // Later opens reuse the hoisted listState, so the user's own scroll position
+    // is preserved instead of being overridden back to the playing song.
     LaunchedEffect(Unit) {
-        if (queueIndex > 2) listState.scrollToItem(queueIndex - 3)
+        if (autoScrollToCurrent && queueIndex > 2) {
+            listState.scrollToItem(queueIndex - 3)
+        }
+        onAutoScrollConsumed()
     }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -796,7 +748,7 @@ private fun QueueSheet(
     }
 }
 
-/** One entry of the 正在播放列表 sheet; the playing one is aurora-highlighted. */
+/** One entry of the 正在播放列表 sheet; the playing one is accent-highlighted. */
 @Composable
 private fun QueueRow(
     track: Track,
@@ -807,10 +759,10 @@ private fun QueueRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 2.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(
                 if (playing) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
                 } else {
                     Color.Transparent
                 },
@@ -823,7 +775,7 @@ private fun QueueRow(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             if (playing) {
-                AuroraText(
+                AccentText(
                     track.title,
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Bold,
@@ -850,7 +802,7 @@ private fun QueueRow(
         }
         Spacer(Modifier.width(10.dp))
         if (playing) {
-            AuroraIcon(
+            AccentIcon(
                 Icons.Filled.GraphicEq,
                 contentDescription = "正在播放",
                 modifier = Modifier.size(20.dp),

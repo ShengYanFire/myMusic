@@ -1,10 +1,8 @@
 package com.mymusic.player.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,14 +13,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -46,14 +42,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -65,14 +61,10 @@ import com.mymusic.player.domain.MusicGenres
 import com.mymusic.player.domain.MusicMoods
 import com.mymusic.player.network.SearchItem
 import com.mymusic.player.network.toTrack
+import com.mymusic.player.ui.theme.Accent
+import com.mymusic.player.ui.theme.AccentText
 import com.mymusic.player.ui.theme.AppGradients
-import com.mymusic.player.ui.theme.AuroraSpectrumDeep
-import com.mymusic.player.ui.theme.AuroraText
-import com.mymusic.player.ui.theme.LocalAuroraPhase
-import com.mymusic.player.ui.theme.TAU
-import com.mymusic.player.ui.theme.auroraFill
-import com.mymusic.player.ui.theme.auroraGlow
-import kotlin.math.sin
+import com.mymusic.player.ui.theme.accentFill
 
 /**
  * Search page: a single scroll container so the hero banner scrolls away while
@@ -104,15 +96,27 @@ fun SearchScreen(
     val resolvingUid by vm.resolvingUid.collectAsState()
     val searchHistory by vm.searchHistory.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
-    val listState = rememberLazyListState()
+    // Saveable so the list returns to the same scroll offset after navigating
+    // to the player and back (an ordinary rememberLazyListState resets to the
+    // top every time the destination is recreated).
+    val listState = rememberSaveableLazyListState()
 
     // Scroll the recommendation feed back to its header whenever the pool is
     // reloaded (pull-to-refresh, or a music-preference change re-personalizing
     // the feed). Generation 1 is the initial load — nothing to scroll back to.
+    // Track the last seen generation so a plain return from the player (which
+    // launches a fresh LaunchedEffect) is not mistaken for a reload and does
+    // not yank the user's restored scroll position back to the top.
+    var lastSeenGeneration by rememberSaveable { mutableStateOf(0) }
     LaunchedEffect(recommendGeneration) {
-        if (recommendGeneration > 1 && recommendations.isNotEmpty()) {
-            listState.scrollToItem(2) // banner(0) + search(1) → feed header
+        if (lastSeenGeneration > 0 &&
+            recommendGeneration > lastSeenGeneration &&
+            recommendations.isNotEmpty()
+        ) {
+            // banner(0) + search(1) [+ history(2) when present] → feed header.
+            listState.scrollToItem(2 + if (searchHistory.isNotEmpty()) 1 else 0)
         }
+        lastSeenGeneration = recommendGeneration
     }
 
     // Pull-to-refresh indicator shows only when there is already content —
@@ -131,7 +135,7 @@ fun SearchScreen(
     PullToRefreshBox(
         isRefreshing = isRefreshing,
         onRefresh = {
-            if (query.isBlank()) vm.refreshRecommendations() else vm.searchNow(query)
+            if (query.isBlank()) vm.refreshRecommendations() else vm.searchNow(query, recordHistory = false)
         },
         modifier = Modifier.fillMaxSize(),
     ) {
@@ -178,7 +182,7 @@ fun SearchScreen(
                         ) {
                             Text(error!!, color = MaterialTheme.colorScheme.error)
                             Spacer(Modifier.height(12.dp))
-                            TextButton(onClick = { vm.searchNow(query) }) {
+                            TextButton(onClick = { vm.searchNow(query, recordHistory = false) }) {
                                 Text("重试")
                             }
                         }
@@ -331,81 +335,40 @@ fun SearchScreen(
     }
 }
 
-/** Top aurora banner; as the first list item it scrolls away with content. */
+/** Top banner; a calm light header with a single red mark. Scrolls away. */
 @Composable
 private fun HeroBanner() {
-    Box(
+    Column(
         Modifier
             .fillMaxWidth()
-            .auroraFill(spectrum = AuroraSpectrumDeep),
+            .padding(start = 22.dp, end = 22.dp, top = 24.dp, bottom = 20.dp),
     ) {
-        // Decorative glow circles — an aurora haze.
-        Box(
-            Modifier
-                .size(170.dp)
-                .align(Alignment.TopEnd)
-                .offset(x = 44.dp, y = (-60).dp)
-                .background(Color.White.copy(alpha = 0.10f), CircleShape),
-        )
-        Box(
-            Modifier
-                .size(240.dp)
-                .align(Alignment.BottomEnd)
-                .offset(x = 96.dp, y = 60.dp)
-                .background(Color.Black.copy(alpha = 0.16f), CircleShape),
-        )
-        // A living aurora halo echoing the drifting accent.
-        Box(
-            Modifier
-                .size(90.dp)
-                .align(Alignment.TopEnd)
-                .offset(x = (-70).dp, y = 34.dp)
-                .auroraGlow(alpha = 0.30f),
-        )
-        Column(Modifier.padding(start = 22.dp, end = 22.dp, top = 28.dp, bottom = 30.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(Accent),
+            )
+            Spacer(Modifier.width(8.dp))
             Text(
                 "MyMusic",
                 style = MaterialTheme.typography.labelLarge,
-                color = Color.White.copy(alpha = 0.78f),
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "发现好音乐",
-                style = MaterialTheme.typography.headlineMedium,
-                color = Color.White,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "搜索 B 站音乐 / UP 主，点击即播",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.85f),
-            )
-            Spacer(Modifier.height(14.dp))
-            EqualizerBars()
-        }
-    }
-}
-
-/** Five rounded bars bobbing quietly on the shared aurora clock. */
-@Composable
-private fun EqualizerBars() {
-    val aurora = LocalAuroraPhase.current
-    Canvas(Modifier.size(width = 60.dp, height = 26.dp)) {
-        val t = aurora.value
-        val barWidth = 6.dp.toPx()
-        val gap = 5.dp.toPx()
-        val corner = CornerRadius(3.dp.toPx(), 3.dp.toPx())
-        listOf(10, 20, 14, 26, 16).forEachIndexed { i, base ->
-            // Integer clock multiplier → the dance loops seamlessly.
-            val wave = 0.55f + 0.45f * (0.5f + 0.5f * sin(t * TAU * 2f + i * 1.9f))
-            val h = base.dp.toPx() * wave
-            drawRoundRect(
-                color = Color.White.copy(alpha = 0.65f),
-                topLeft = Offset(i * (barWidth + gap), size.height - h),
-                size = Size(barWidth, h),
-                cornerRadius = corner,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "发现好音乐",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "搜索 B 站音乐 / UP 主，点击即播",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -417,12 +380,11 @@ private fun StickySearchBar(
     onClear: () -> Unit,
     onSearch: () -> Unit,
 ) {
-    val dark = isSystemInDarkTheme()
     Box(
         Modifier
             .fillMaxWidth()
-            .background(AppGradients.backgroundTop(dark))
-            .padding(top = 6.dp, bottom = 6.dp),
+            .background(AppGradients.backgroundTop(dark = false))
+            .padding(top = 6.dp, bottom = 8.dp),
     ) {
         TextField(
             value = query,
@@ -431,12 +393,12 @@ private fun StickySearchBar(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .shadow(
-                    elevation = 8.dp,
-                    shape = RoundedCornerShape(28.dp),
-                    ambientColor = Color(0x40000000),
-                    spotColor = Color(0x40000000),
+                    elevation = 2.dp,
+                    shape = RoundedCornerShape(18.dp),
+                    ambientColor = Color(0x10000000),
+                    spotColor = Color(0x10000000),
                 )
-                .clip(RoundedCornerShape(28.dp)),
+                .clip(RoundedCornerShape(18.dp)),
             placeholder = {
                 Text("搜索歌曲、UP 主、视频", color = MaterialTheme.colorScheme.onSurfaceVariant)
             },
@@ -444,7 +406,7 @@ private fun StickySearchBar(
                 Icon(
                     Icons.Filled.Search,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             },
             trailingIcon = {
@@ -455,7 +417,7 @@ private fun StickySearchBar(
                 }
             },
             singleLine = true,
-            shape = RoundedCornerShape(28.dp),
+            shape = RoundedCornerShape(18.dp),
             colors = TextFieldDefaults.colors(
                 focusedContainerColor = MaterialTheme.colorScheme.surface,
                 unfocusedContainerColor = MaterialTheme.colorScheme.surface,
@@ -523,7 +485,7 @@ private fun HistoryChip(term: String, onPick: () -> Unit, onRemove: () -> Unit) 
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .clickable(onClick = onPick)
             .padding(start = 12.dp, top = 5.dp, bottom = 5.dp, end = 2.dp),
     ) {
@@ -562,11 +524,7 @@ private fun ListHeaderRow(title: String, onPlayAll: () -> Unit) {
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.weight(1f),
         )
-        GradientButton(
-            text = "全部播放",
-            icon = Icons.Filled.PlayArrow,
-            onClick = onPlayAll,
-        )
+        PlayAllButton(onClick = onPlayAll)
     }
 }
 
@@ -585,13 +543,7 @@ private fun RecommendHeader(
 ) {
     val labels = MusicGenres.labelsOf(favoriteGenreIds) + MusicMoods.labelsOf(favoriteMoodIds)
     val hasPreference = labels.isNotEmpty()
-    // Show up to 4 genre/mood labels, then "等 N 项" for the rest.
-    val summary = if (hasPreference) {
-        val shown = labels.take(4).joinToString(" · ")
-        if (labels.size > 4) "$shown 等 ${labels.size} 项" else shown
-    } else {
-        null
-    }
+    val summary = if (hasPreference) summarizeLabels(labels) else null
     Row(
         Modifier
             .fillMaxWidth()
@@ -611,8 +563,8 @@ private fun RecommendHeader(
             )
             Spacer(Modifier.height(2.dp))
             if (summary != null) {
-                // Preference summary breathes with the aurora.
-                AuroraText(
+                // Preference summary tinted with the brand red.
+                AccentText(
                     summary,
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
@@ -628,11 +580,7 @@ private fun RecommendHeader(
                 )
             }
         }
-        GradientButton(
-            text = "全部播放",
-            icon = Icons.Filled.PlayArrow,
-            onClick = onPlayAll,
-        )
+        PlayAllButton(onClick = onPlayAll)
     }
 }
 
@@ -671,8 +619,8 @@ private fun SearchRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 5.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -682,8 +630,8 @@ private fun SearchRow(
             contentDescription = null,
             modifier = Modifier
                 .size(56.dp)
-                .shadow(6.dp, RoundedCornerShape(14.dp))
-                .clip(RoundedCornerShape(14.dp)),
+                .shadow(2.dp, RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(12.dp)),
             contentScale = ContentScale.Crop,
         )
         Spacer(Modifier.width(12.dp))
@@ -696,7 +644,17 @@ private fun SearchRow(
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                "${item.author} · ${formatDuration(item.duration)} · ${formatPlayCount(item.play)} 播放",
+                buildString {
+                    append(item.author)
+                    append(" · ")
+                    append(formatDuration(item.duration))
+                    val play = item.play
+                    if (play != null) {
+                        append(" · ")
+                        append(formatPlayCount(play))
+                        append(" 播放")
+                    }
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -707,14 +665,8 @@ private fun SearchRow(
         Box(
             Modifier
                 .size(38.dp)
-                .shadow(
-                    elevation = 8.dp,
-                    shape = CircleShape,
-                    ambientColor = Color(0x40000000),
-                    spotColor = Color(0x40000000),
-                )
                 .clip(CircleShape)
-                .auroraFill(CircleShape, phaseOffset = 0.05f),
+                .accentFill(),
             contentAlignment = Alignment.Center,
         ) {
             if (resolving) {

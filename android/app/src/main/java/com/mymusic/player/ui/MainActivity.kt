@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import com.mymusic.player.R
 import com.mymusic.player.ui.theme.MyMusicTheme
 
@@ -31,6 +32,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Light-first app: keep dark status/navigation bar icons so they stay
+        // readable against the near-white paper background.
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
 
         // Android 13+ needs runtime permission to show the media notification.
         if (Build.VERSION.SDK_INT >= 33 &&

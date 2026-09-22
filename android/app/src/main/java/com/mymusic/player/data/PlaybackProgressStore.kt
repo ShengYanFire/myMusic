@@ -54,7 +54,7 @@ class PlaybackProgressStore(private val context: Context) {
         context.progressDataStore.edit { prefs ->
             prefs[stateKey] = gson.toJson(
                 SavedPlaybackState(
-                    queue = queue.map(::sanitizeForSave),
+                    queue = queue.map { it.sanitizeForSave() },
                     currentUid = currentUid,
                     positionMs = positionMs.coerceAtLeast(0L),
                 ),
@@ -66,14 +66,6 @@ class PlaybackProgressStore(private val context: Context) {
         context.progressDataStore.edit { prefs -> prefs.remove(stateKey) }
     }
 
-    /** Strip the direct URLs that expire after hours before persisting. */
-    private fun sanitizeForSave(track: Track): Track =
-        if (track.audioUrl != null || track.audioUrls.isNotEmpty()) {
-            track.copy(audioUrl = null, audioUrls = emptyList())
-        } else {
-            track
-        }
-
     // Parsed manually from JsonObject (not gson.fromJson<SavedPlaybackState>):
     // Gson Unsafe-instantiates data classes with no constructor, so a missing
     // field would read as null through a non-null Kotlin property and crash
@@ -84,7 +76,7 @@ class PlaybackProgressStore(private val context: Context) {
             ?: return null
         val queue = runCatching {
             gson.fromJson(obj.get("queue"), Array<Track>::class.java)
-        }.getOrNull()?.mapNotNull(::sanitizeLoaded).orEmpty()
+        }.getOrNull()?.mapNotNull(::sanitizeLoadedTrack).orEmpty()
         val currentUid = (obj.get("currentUid") as? JsonPrimitive)?.asString
         val positionMs = (obj.get("positionMs") as? JsonPrimitive)
             ?.takeIf { it.isNumber }
@@ -94,20 +86,6 @@ class PlaybackProgressStore(private val context: Context) {
             queue = queue,
             currentUid = currentUid,
             positionMs = positionMs.coerceAtLeast(0L),
-        )
-    }
-
-    /** Same repair the library applies: Gson/Unsafe leaves `page` 0 and null
-     *  title on partial data — fix identity and drop entries without a bvid. */
-    private fun sanitizeLoaded(track: Track?): Track? {
-        val bvid = track?.bvid
-        if (bvid.isNullOrBlank()) return null
-        val page = if (track.page >= 1) track.page else 1
-        return track.copy(
-            title = track.title ?: "",
-            page = page,
-            audioUrl = null,
-            audioUrls = emptyList(),
         )
     }
 }

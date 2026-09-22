@@ -47,17 +47,19 @@ class SearchHistoryStore(private val context: Context) {
 
     /** Remove every occurrence of [query] (normally exactly one). */
     suspend fun remove(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) return
         context.searchHistoryDataStore.edit { prefs ->
             val current = parse(prefs[key] ?: "[]").toMutableList()
             val before = current.size
-            current.removeAll { it == query }
+            current.removeAll { it == q }
             if (current.size != before) prefs[key] = gson.toJson(current)
         }
     }
 
     suspend fun clear() {
         context.searchHistoryDataStore.edit { prefs ->
-            if (prefs[key] != null) prefs.remove(key)
+            prefs.remove(key)
         }
     }
 

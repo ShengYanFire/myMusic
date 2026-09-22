@@ -3,29 +3,30 @@ package com.mymusic.player.ui.theme
 import androidx.compose.ui.graphics.Color
 
 /**
- * Static surface colors shared across the app.
+ * Static surface tones shared across the app (light-first).
  *
- * All *gradients* are now living auroras driven by [AuroraFlow] — see
- * `Modifier.auroraFill`, `Modifier.auroraGlow`, [AuroraSky] and
- * [auroraAccent]. This file only keeps the fixed glass / scrim tones that
- * should NOT shift with the aurora (they carry text and keep the UI calm).
+ * Accent surfaces (buttons, pills, progress fills) use the flat [accentFill] /
+ * [accentHorizontalBrush] from Accent.kt — one solid brand red. This file only
+ * keeps the neutral paper/glass tones that carry text and keep the UI calm.
  */
 object AppGradients {
 
     /**
      * Top color of the page background, used by sticky headers to blend into
-     * the (static) top of [AuroraSky]'s base gradient — the aurora curtains
-     * are biased below the header band so the blend stays seamless.
+     * the top of the page base color.
      */
     fun backgroundTop(dark: Boolean): Color =
-        if (dark) Color(0xFF081020) else Color(0xFFF5FBF9)
+        if (dark) Color(0xFF0B0B0E) else Color(0xFFF6F6F8)
 
-    /** Deep translucent night-glass surface used by floating bars / mini player. */
-    val BarGlass = Color(0xF20B1622)
+    /** Bottom navigation / mini-player surface — near-opaque white. */
+    val BarSurface = Color(0xFFFFFFFF)
 
-    /** Bottom fade of the bottom navigation bar. */
-    val BarBottom = Color(0xFF070D18)
+    /** Bottom fade of the bottom navigation bar (kept opaque white). */
+    val BarBottom = Color(0xFFFFFFFF)
 
-    /** Dark translucent scrim used over blurred album art. */
-    val ScrimDark = Color(0xCC05131A)
+    /** Hairline divider above the bottom bar. */
+    val BarDivider = Color(0xFFE9E9ED)
+
+    /** Light translucent scrim used over blurred art / success overlays. */
+    val ScrimLight = Color(0xE6FFFFFF)
 }

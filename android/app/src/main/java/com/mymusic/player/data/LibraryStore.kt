@@ -50,7 +50,7 @@ class LibraryStore(private val context: Context) {
     // transaction (no read-outside / write-inside race between concurrent edits).
 
     suspend fun toggleFavorite(track: Track) {
-        val track = sanitizeForSave(track)
+        val track = track.sanitizeForSave()
         context.libraryDataStore.edit { prefs ->
             val current = parse(prefs[favoritesKey] ?: "[]")
             prefs[favoritesKey] = if (current.any { it.uid == track.uid }) {
@@ -88,7 +88,7 @@ class LibraryStore(private val context: Context) {
     }
 
     suspend fun addToPlaylist(playlistId: String, track: Track): Boolean {
-        val track = sanitizeForSave(track)
+        val track = track.sanitizeForSave()
         var changed = false
         mutatePlaylists { playlists ->
             val index = playlists.indexOfFirst { it.id == playlistId }
@@ -130,22 +130,10 @@ class LibraryStore(private val context: Context) {
         }
     }
 
-    /**
-     * B站 direct-stream URLs expire after hours; persisting them is dead
-     * weight that bloats the JSON (and would be played stale). Keep only the
-     * identity/metadata the library actually needs.
-     */
-    private fun sanitizeForSave(track: Track): Track =
-        if (track.audioUrl != null || track.audioUrls.isNotEmpty()) {
-            track.copy(audioUrl = null, audioUrls = emptyList())
-        } else {
-            track
-        }
-
     private fun parse(raw: String): List<Track> =
         runCatching {
             gson.fromJson(raw, Array<Track>::class.java)
-                ?.mapNotNull { sanitizeLoaded(it) }
+                ?.mapNotNull(::sanitizeLoadedTrack)
                 ?: emptyList()
         }.getOrDefault(emptyList())
 
@@ -153,27 +141,4 @@ class LibraryStore(private val context: Context) {
         runCatching {
             gson.fromJson(raw, Array<Playlist>::class.java)?.toList() ?: emptyList()
         }.getOrDefault(emptyList())
-
-    /**
-     * Gson instantiates via Unsafe — no constructor, no default values: a
-     * JSON entry missing `page` deserializes as page = 0 (which breaks the
-     * uid identity) and a missing `title`/`bvid` yields null in a non-null
-     * Kotlin type. Repair page and blank title, drop entries without a
-     * bvid, so one bad entry can never null-crash the library read path
-     * (which would drop the WHOLE list through the surrounding runCatching).
-     */
-    private fun sanitizeLoaded(track: Track?): Track? {
-        val bvid = track?.bvid
-        if (bvid.isNullOrBlank()) return null
-        val page = if (track.page >= 1) track.page else 1
-        // Strip any persisted direct URL (legacy saves carried them): URLs
-        // expire after hours and are re-resolved on play — keeping them only
-        // bloats memory and risks replaying stale links.
-        return track.copy(
-            title = track.title ?: "",
-            page = page,
-            audioUrl = null,
-            audioUrls = emptyList(),
-        )
-    }
 }

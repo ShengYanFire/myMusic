@@ -67,11 +67,11 @@ class BiliDirectClient(
             ),
             signed = true,
         )
-        val result = body.obj("data").getAsJsonArray("result")
+        val result = body.obj("data").get("result")?.takeIf { it.isJsonArray }?.asJsonArray
             ?: return emptyList()
         return result.mapNotNull { el ->
-            val o = el.asJsonObject
-            if (o.get("type")?.asString != "video") return@mapNotNull null
+            val o = el as? JsonObject ?: return@mapNotNull null
+            if (o.str("type") != "video") return@mapNotNull null
             toSearchItem(o)
         }
     }
@@ -86,8 +86,9 @@ class BiliDirectClient(
             mapOf("rid" to 3),
             signed = false,
         )
-        val list = body.obj("data").getAsJsonArray("list") ?: return emptyList()
-        return list.mapNotNull { toSearchItem(it.asJsonObject) }.take(limit)
+        val list = body.obj("data").get("list")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: return emptyList()
+        return list.mapNotNull { (it as? JsonObject)?.let(::toSearchItem) }.take(limit)
     }
 
     /**
@@ -103,7 +104,7 @@ class BiliDirectClient(
         // This endpoint returns the ranked list as a top-level array under data.
         val arr = body.get("data")?.takeIf { it.isJsonArray }?.asJsonArray
             ?: return emptyList()
-        return arr.mapNotNull { toSearchItem(it.asJsonObject) }.take(limit)
+        return arr.mapNotNull { (it as? JsonObject)?.let(::toSearchItem) }.take(limit)
     }
 
     /**
@@ -183,7 +184,7 @@ class BiliDirectClient(
             mapOf("bvid" to bvid, "cid" to cid, "fnval" to 16, "fourk" to 1),
             signed = true,
         )
-        val dash = body.obj("data").getAsJsonObject("dash")
+        val dash = body.obj("data").get("dash")?.takeIf { it.isJsonObject }?.asJsonObject
             ?: throw RuntimeException("该视频没有可用的纯音频流（可能未登录或需大会员）")
         // Defensive casts throughout: a malformed element means "skip the
         // tier", never a parse crash (consistent with the rest of this file).
@@ -241,7 +242,7 @@ class BiliDirectClient(
             mapOf("bvid" to bvid, "cid" to cid),
             signed = true,
         )
-        val subtitle = body.objOrNull("data")?.getAsJsonObject("subtitle")
+        val subtitle = body.objOrNull("data")?.get("subtitle")?.takeIf { it.isJsonObject }?.asJsonObject
             ?: return emptyList()
         val arr = subtitle.get("subtitles")?.takeIf { it.isJsonArray }?.asJsonArray
             ?: return emptyList()
@@ -371,8 +372,11 @@ class BiliDirectClient(
         if (imgUrl.isBlank() || subUrl.isBlank()) {
             throw RuntimeException("B 站响应缺少 WBI 密钥")
         }
-        val imgKey = imgUrl.substring(imgUrl.lastIndexOf('/') + 1, imgUrl.lastIndexOf('.'))
-        val subKey = subUrl.substring(subUrl.lastIndexOf('/') + 1, subUrl.lastIndexOf('.'))
+        // Key = the file name sans extension. substringAfter/-BeforeLast never
+        // throw: a malformed /nav response missing '/' or '.' falls back to the
+        // whole input instead of crashing with a StringIndexOutOfBoundsException.
+        val imgKey = imgUrl.substringAfterLast('/').substringBeforeLast('.')
+        val subKey = subUrl.substringAfterLast('/').substringBeforeLast('.')
         val keys = WbiKeys(imgKey, subKey)
         wbi = keys
         wbiFetchedAt = now

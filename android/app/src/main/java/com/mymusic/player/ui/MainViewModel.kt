@@ -206,7 +206,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun searchNow(keyword: String) {
+    fun searchNow(keyword: String, recordHistory: Boolean = true) {
         val q = keyword.trim()
         if (q.isEmpty()) return
         query.value = q
@@ -214,12 +214,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         loadingMoreSearch.value = false
         searchJob = viewModelScope.launch {
             // An explicit submit (search button / IME action / a history-or-hot
-            // chip tap) is recorded immediately — the user clearly meant to
-            // search it, even if the request later fails. The as-you-type
-            // debounce path is deliberately NOT recorded (it would save words
-            // like "周" then "周杰" then "周杰伦"), matching SearchHistoryStore's
-            // contract.
-            historyStore.add(q)
+            // chip tap) records the term immediately — the user clearly meant to
+            // search it, even if the request later fails. Pull-to-refresh and the
+            // error "重试" pass recordHistory = false so re-searching the same
+            // term doesn't keep bumping it to the top. The as-you-type debounce
+            // path is never recorded at all.
+            if (recordHistory) historyStore.add(q)
             doSearch(q)
         }
     }
