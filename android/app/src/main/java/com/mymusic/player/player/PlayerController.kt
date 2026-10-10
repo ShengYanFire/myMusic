@@ -18,6 +18,7 @@ import com.mymusic.player.MyMusicApp
 import com.mymusic.player.data.SavedPlaybackState
 import com.mymusic.player.domain.Track
 import com.mymusic.player.network.AudioUrlExpiry
+import com.mymusic.player.util.AppLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 
 /**
  * Player state for the UI. Deliberately EXCLUDES the playback position: a
@@ -86,6 +92,13 @@ object PlayerController {
 
     /** While playing, persist the position at most this often. */
     private const val PROGRESS_PERIODIC_SAVE_MS = 15_000L
+
+    /** Consecutive connectivity-level failures (DNS/connection, not CDN 4xx)
+     *  tolerated before the player holds position and backs off. */
+    private const val NETWORK_FAILURE_BACKOFF_THRESHOLD = 3
+
+    /** Base delay (ms) between automatic retries once a network outage is held. */
+    private const val NETWORK_RETRY_BASE_MS = 5_000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -152,6 +165,16 @@ object PlayerController {
      */
     private val freshResolved = mutableSetOf<String>()
 
+    /** Consecutive queue entries that failed at the CONNECTIVITY layer
+     *  (DNS/connection), reset whenever a track actually starts playing. */
+    private var consecutiveNetworkFailures = 0
+
+    /** In-flight automatic retry after a run of connectivity failures. */
+    private var networkRetryJob: Job? = null
+
+    /** Media ids with a just-in-time (prewarm) re-resolution already in flight. */
+    private val prewarmInFlight = mutableSetOf<String>()
+
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
@@ -190,6 +213,18 @@ object PlayerController {
 
     private var sleepDeadlineMs: Long? = null
 
+    /** 定时停止播放的"到点后先等当前歌播完再退出"偏好（持久化）。 */
+    private val _sleepWaitTrackEnd = MutableStateFlow(false)
+    val sleepWaitTrackEnd: StateFlow<Boolean> = _sleepWaitTrackEnd.asStateFlow()
+
+    /** 定时已到期、正在等当前这一首自然播完（非持久化的瞬时状态）。 */
+    private val _sleepAwaitingTrackEnd = MutableStateFlow(false)
+    val sleepAwaitingTrackEnd: StateFlow<Boolean> = _sleepAwaitingTrackEnd.asStateFlow()
+
+    /** 进入"等曲尾"时，若原本是单曲循环，我们临时切到顺序播放好让曲尾可被
+     *  检测；此标志记录该临时改动，供取消定时/退出时恢复（持久化值始终未动）。 */
+    private var sleepTemporarilyDisabledRepeatOne = false
+
     /**
      * A seek committed through [seekTo] that the player has not confirmed yet.
      *
@@ -206,6 +241,7 @@ object PlayerController {
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _state.value = _state.value.copy(isPlaying = isPlaying, retrying = false)
+            if (isPlaying) consecutiveNetworkFailures = 0
             if (!isPlaying) scheduleProgressSave()
         }
 
@@ -214,15 +250,20 @@ object PlayerController {
             // preview is meaningless.
             pendingSeekMs = null
             _state.value = _state.value.copy(loadingNextUid = null, buffering = false)
-            Log.e(
+            val httpCause = error.cause as? HttpDataSource.InvalidResponseCodeException
+            AppLog.e(
                 TAG,
-                "播放错误 errorCode=${error.errorCode} " +
+                "播放错误 errorCode=${error.errorCode} http=${httpCause?.responseCode} " +
                     "message=${error.message} cause=${error.cause}",
             )
             // Retryable = transport-level failure (HTTP 403/404, connection
             // errors). Not retryable = decoding/format problems.
             val retryable = error.errorCode in 2000..2009 ||
                 error.cause is HttpDataSource.InvalidResponseCodeException
+            // Connectivity (DNS/connect) failures, unlike CDN 4xx, make mirror
+            // rotation AND re-resolution pointless (both hit the same dead
+            // network) — so they jump straight to report + backoff below.
+            val networkFailure = isConnectivityFailure(error)
             val c = controller
             val mediaId = c?.currentMediaItem?.mediaId
             val candidateUrls = mediaId?.let { pendingUrls[it] }.orEmpty()
@@ -234,12 +275,12 @@ object PlayerController {
             //    same playurl response is past it too, so rotation is pure waste
             //    — jump straight to re-resolution (step 2) instead.
             val deadlineExpired = AudioUrlExpiry.isExpired(candidateUrls.getOrNull(idx))
-            if (retryable && c != null && mediaId != null && !deadlineExpired &&
-                candidateUrls.size > 1 && idx < candidateUrls.lastIndex
+            if (!networkFailure && retryable && c != null && mediaId != null &&
+                !deadlineExpired && candidateUrls.size > 1 && idx < candidateUrls.lastIndex
             ) {
                 val next = idx + 1
                 pendingIndex[mediaId] = next
-                Log.w(TAG, "音源降级 bvid=$mediaId ${idx + 1}/${candidateUrls.size} -> ${candidateUrls[next]}")
+                AppLog.w(TAG, "音源降级 bvid=$mediaId ${idx + 1}/${candidateUrls.size} -> ${candidateUrls[next]}")
                 _state.value = _state.value.copy(error = null, retrying = true)
                 val track = pendingTrack[mediaId]
                 val newItem = toMediaItem(track, candidateUrls[next])
@@ -257,11 +298,16 @@ object PlayerController {
             //    app sat in the background": Bilibili direct-stream URLs carry
             //    a deadline and expire, and every stored candidate shares the
             //    same expiry, so rotating mirrors (step 1) can never help.
-            //    Re-ask the API for a brand-new URL (once per track per queue).
+            //    Re-ask the API for a brand-new URL. The single-shot guard is
+            //    re-armed whenever the failed URL is provably past its deadline,
+            //    because after hours of playback (long single-loop) even the
+            //    URL we re-resolved last time has expired again — and a dead
+            //    link's only fix is another fresh one. It still caps re-resolve
+            //    attempts for NON-expiry (transient CDN) failures.
             val track = mediaId?.let { pendingTrack[it] }
                 ?: _state.value.queue.firstOrNull { it.uid == mediaId }
-            if (retryable && c != null && mediaId != null &&
-                track != null && mediaId !in freshResolved
+            if (!networkFailure && retryable && c != null && mediaId != null &&
+                track != null && (mediaId !in freshResolved || deadlineExpired)
             ) {
                 freshResolved.add(mediaId)
                 _state.value = _state.value.copy(error = null, retrying = true)
@@ -296,7 +342,7 @@ object PlayerController {
                     ) {
                         return@launch
                     }
-                    Log.w(TAG, "音源已重新解析 bvid=$mediaId")
+                    AppLog.w(TAG, "音源已重新解析 bvid=$mediaId")
                     c.replaceMediaItem(pos, toMediaItem(fresh, fresh.usableAudioUrls.first()))
                     c.seekTo(pos, 0L)
                     c.prepare()
@@ -308,14 +354,36 @@ object PlayerController {
             // 3) Exhausted every candidate: report the error, then skip over
             //    the dead track so the queue keeps flowing in the background
             //    instead of wedging the player in STATE_IDLE.
-            val causeMsg = error.cause?.message ?: error.message ?: "未知错误"
-            val failedUrl = (error.cause as? HttpDataSource.InvalidResponseCodeException)
-                ?.dataSpec?.uri?.toString()
+            val http = error.cause as? HttpDataSource.InvalidResponseCodeException
+            val httpCode = http?.responseCode
+            val causeMsg = httpCode?.let { httpFailureHint(it) }
+                ?: error.cause?.message
+                ?: error.message
+                ?: "未知错误"
+            // The full (signed) CDN URL is already captured in the AppLog above;
+            // showing it to the user is noisy and leaks a signature-bearing link.
             _state.value = _state.value.copy(
-                error = "播放失败（错误码 ${error.errorCode}）：$causeMsg" +
-                    (failedUrl?.let { "\n$it" } ?: ""),
+                error = buildString {
+                    append("播放失败（错误码 ${error.errorCode}")
+                    if (httpCode != null) append(" · HTTP $httpCode")
+                    append('）')
+                    append('：')
+                    append(causeMsg)
+                },
                 isPlaying = false,
+                retrying = false,
             )
+            // Connectivity backoff: a DNS/connection outage fails every mirror
+            // identically, so advancing only burns the queue. After a short run
+            // of network failures, hold the position and retry with backoff.
+            consecutiveNetworkFailures =
+                if (networkFailure) consecutiveNetworkFailures + 1 else 0
+            if (c != null && networkFailure &&
+                consecutiveNetworkFailures >= NETWORK_FAILURE_BACKOFF_THRESHOLD
+            ) {
+                scheduleNetworkRetry(c)
+                return
+            }
             c?.let(::skipAfterFailure)
         }
 
@@ -325,8 +393,19 @@ object PlayerController {
                 retrying = false,
                 loadingNextUid = null,
             )
+            // 定时"等当前歌播完再退出"：AUTO 过渡 == 当前这首自然播完、进下一首
+            // 的时刻，此时才真正停机（手动上一首/下一首产生 SEEK 不在此列）。
+            if (_sleepAwaitingTrackEnd.value &&
+                reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
+            ) {
+                stopAndExit()
+                return
+            }
             syncFromPlayer()
             reconcileShuffleAfterTransition(reason)
+            // A track actually started; a run of connectivity failures is over.
+            consecutiveNetworkFailures = 0
+            prewarmNextIfExpired()
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -339,6 +418,11 @@ object PlayerController {
                 buffering = playbackState == Player.STATE_BUFFERING &&
                     c?.playWhenReady == true,
             )
+            // 等曲尾退出期间，repeat off 的最后一首自然播完会进入 STATE_ENDED
+            // 而不触发 AUTO 过渡——同样等价于"这一首播完"。
+            if (_sleepAwaitingTrackEnd.value && playbackState == Player.STATE_ENDED) {
+                stopAndExit()
+            }
         }
 
         override fun onPositionDiscontinuity(
@@ -379,6 +463,7 @@ object PlayerController {
                 c.repeatMode = saved
                 _repeatMode.value = saved
                 _shuffleEnabled.value = MyMusicApp.instance.settings.shuffleEnabled.first()
+                _sleepWaitTrackEnd.value = MyMusicApp.instance.settings.sleepWaitTrackEnd.first()
             }
             pendingQueue?.let { q ->
                 pendingQueue = null
@@ -399,7 +484,29 @@ object PlayerController {
                     if (remaining <= 0) {
                         sleepDeadlineMs = null
                         _sleepRemainingMs.value = null
-                        stopAndExit()
+                        // 到点：偏好是"等当前歌播完"且确实有歌在放，则进入曲尾
+                        // 等待（onMediaItemTransition / STATE_ENDED 时真正退出）；
+                        // 否则立即停止。注意不能用 c.isPlaying——它在 STATE_BUFFERING
+                        // 时为 false，会误把"缓冲中"当成"没在播"而立刻退出。
+                        val activelyPlaying = c.playWhenReady &&
+                            (c.playbackState == Player.STATE_READY ||
+                                c.playbackState == Player.STATE_BUFFERING)
+                        if (_sleepWaitTrackEnd.value &&
+                            _state.value.current != null &&
+                            activelyPlaying
+                        ) {
+                            // 单曲循环下曲尾无缝重播、永不产生 AUTO 过渡，会一直
+                            // 等不到；临时切到顺序播放让这一首能走到曲尾（AUTO 或
+                            // STATE_ENDED）从而触发退出，持久化值不被改动。
+                            if (c.repeatMode == Player.REPEAT_MODE_ONE) {
+                                c.repeatMode = Player.REPEAT_MODE_OFF
+                                sleepTemporarilyDisabledRepeatOne = true
+                            }
+                            _sleepAwaitingTrackEnd.value = true
+                            AppLog.i(TAG, "定时到点：等待当前歌曲播放完后退出")
+                        } else {
+                            stopAndExit()
+                        }
                     }
                 }
                 // Only tick the position while actually playing (or a seek
@@ -506,6 +613,8 @@ object PlayerController {
         pendingIndex.clear()
         pendingTrack.clear()
         freshResolved.clear()
+        prewarmInFlight.clear()
+        consecutiveNetworkFailures = 0
         playable.forEach { (_, pair) ->
             val t = pair.first
             pendingUrls[t.uid] = pair.second
@@ -685,9 +794,11 @@ object PlayerController {
     }
 
     /**
-     * 上一首: restart the current song once it is a few seconds in (standard
-     * player behavior; media3 itself uses a 3 s threshold), otherwise jump to
-     * the previous item — wrapping to the last song under 列表循环.
+     * 上一首: press once and jump straight to the previous song — no
+     * "restart the current song first" pass (media3's 3 s threshold, which
+     * made the first press only reset the song). Wraps to the last song under
+     * 列表循环; only the first song of a queue with repeat off / 单曲循环
+     * (nothing to go back to) restarts.
      */
     fun playPrevious() {
         val c = controller ?: return
@@ -699,10 +810,9 @@ object PlayerController {
         }
         val cur = c.currentMediaItemIndex
         when {
-            c.currentPosition > restartThresholdMs(c) -> seekAndPlay(c, cur, 0L)
             cur > 0 -> seekAndPlay(c, cur - 1)
             c.repeatMode == Player.REPEAT_MODE_ALL && count > 1 -> seekAndPlay(c, count - 1)
-            // First song of the queue with repeat off / one: restart it.
+            // First song of the queue with repeat off / one: nothing to switch to.
             else -> seekAndPlay(c, cur, 0L)
         }
     }
@@ -728,31 +838,43 @@ object PlayerController {
     }
 
     /**
-     * 上一首 under shuffle: both deques mirror the forward walk, so this is the
-     * symmetric undo — pop the most recent history entry and put the current
-     * song back at the FRONT of the upcoming deck. Standard 上一首 semantics
-     * still apply first: a song that has played a few seconds just restarts.
+     * 上一首 under shuffle: press once and step straight back along the random
+     * walk — both deques mirror the forward walk, so this is the symmetric undo
+     * (pop the most recent history entry and put the current song back at the
+     * FRONT of the upcoming deck). No "restart first" pass. When the history is
+     * empty (the round's first song), 列表循环 wraps backward to the tail of
+     * the upcoming deck so it still navigates.
      */
     private fun playPreviousShuffled(c: MediaController) {
         val q = _state.value.queue
         if (q.size <= 1) return
         ensureShuffleSeeded(q)
-        // Restart either because the song is a few seconds in, or because the
-        // round has no history left behind it (nothing to go back to).
-        if (c.currentPosition > restartThresholdMs(c) || shuffleHistory.isEmpty()) {
-            seekAndPlay(c, c.currentMediaItemIndex, 0L)
+        // Step one entry back along the random walk. With no history behind us
+        // yet (this is the round's first song), 列表循环 wraps backward to the
+        // tail of the upcoming deck — mirroring linear 上一首's wrap-to-last
+        // under REPEAT_MODE_ALL — so the first song is never a dead end that
+        // just restarts instead of navigating.
+        val prev = shuffleHistory.removeLastOrNull()
+        if (prev == null) {
+            if (c.repeatMode != Player.REPEAT_MODE_ALL) {
+                seekAndPlay(c, c.currentMediaItemIndex, 0L)
+                return
+            }
+            val tail = shuffleUpcoming.removeLastOrNull()
+            if (tail == null) {
+                // Nothing sits behind the first song either — restart.
+                seekAndPlay(c, c.currentMediaItemIndex, 0L)
+                return
+            }
+            if (shuffleAnchorIndex >= 0) shuffleUpcoming.addFirst(shuffleAnchorIndex)
+            shuffleAnchorIndex = tail
+            requestResolveOnDemand(c, q[tail])
             return
         }
-        val prev = shuffleHistory.removeLast()
         if (shuffleAnchorIndex >= 0) shuffleUpcoming.addFirst(shuffleAnchorIndex)
         shuffleAnchorIndex = prev
         requestResolveOnDemand(c, q[prev])
     }
-
-    /** Position past which 上一首 restarts the current song instead of going
-     *  back: media3 uses 3 s, halved for very short tracks so it still works. */
-    private fun restartThresholdMs(c: MediaController): Long =
-        if (c.duration > 0) minOf(3_000L, c.duration / 2) else 3_000L
 
     /**
      * Seed the shuffle deck once for the current queue when no round exists yet
@@ -989,7 +1111,10 @@ object PlayerController {
         val q = _state.value.queue
         if (q.isEmpty()) return false
         if (_shuffleEnabled.value) {
-            return shuffleHistory.isNotEmpty()
+            // History lets 上一首 step back; under 列表循环 it can also wrap
+            // backward from the round's first song, mirroring hasNextInQueue's
+            // "列表循环 means there is always something next".
+            return shuffleHistory.isNotEmpty() || _repeatMode.value == Player.REPEAT_MODE_ALL
         }
         val qi = _state.value.queueIndex
         return qi > 0
@@ -1094,14 +1219,40 @@ object PlayerController {
         scope.launch { MyMusicApp.instance.settings.setShuffleEnabled(next) }
     }
 
-    /** Set a sleep timer in minutes (<=0 cancels). When it fires, playback stops and the app exits. */
+    /** Set a sleep timer in minutes (<=0 cancels). When it fires, playback stops
+     *  and the app exits — after the current track finishes when the user enabled
+     *  that option (see [setSleepWaitTrackEnd]), otherwise immediately. */
     fun setSleepTimer(minutes: Int) {
+        // 新的定时（或取消）覆盖上一次可能残留的"等曲尾退出"状态，并把为等
+        // 曲尾临时改掉的单曲循环恢复回来。
+        restoreSleepRepeatOneIfNeeded()
+        _sleepAwaitingTrackEnd.value = false
         if (minutes <= 0) {
             sleepDeadlineMs = null
             _sleepRemainingMs.value = null
         } else {
             sleepDeadlineMs = System.currentTimeMillis() + minutes * 60_000L
         }
+    }
+
+    /**
+     * 若之前为等曲尾临时把单曲循环切成顺序播放，恢复回来——仅当用户没在
+     * 这期间手动改过循环模式（即此刻仍是顺序播放）时，避免覆盖用户的选择。
+     */
+    private fun restoreSleepRepeatOneIfNeeded() {
+        if (!sleepTemporarilyDisabledRepeatOne) return
+        sleepTemporarilyDisabledRepeatOne = false
+        val c = controller ?: return
+        if (c.repeatMode == Player.REPEAT_MODE_OFF) {
+            c.repeatMode = Player.REPEAT_MODE_ONE
+            _repeatMode.value = Player.REPEAT_MODE_ONE
+        }
+    }
+
+    /** 切换"定时结束后等当前歌曲播放完再退出"偏好并持久化。 */
+    fun setSleepWaitTrackEnd(enabled: Boolean) {
+        _sleepWaitTrackEnd.value = enabled
+        scope.launch { MyMusicApp.instance.settings.setSleepWaitTrackEnd(enabled) }
     }
 
     /**
@@ -1112,6 +1263,10 @@ object PlayerController {
      * and skipped all normal teardown.)
      */
     private fun stopAndExit() {
+        // 任何退出路径都清掉"等曲尾"标志；并把为等曲尾临时改掉的单曲循环
+        // 恢复回来，让内存态与持久化偏好保持一致。
+        _sleepAwaitingTrackEnd.value = false
+        restoreSleepRepeatOneIfNeeded()
         val c = controller
         c?.pause()
         c?.stop()
@@ -1161,6 +1316,101 @@ object PlayerController {
     private suspend fun resolveFresh(track: Track): Result<Track> =
         MyMusicApp.instance.audioCache.resolveShared(track, force = true).await()
 
+    /** True when [error] is a connectivity-level failure (DNS/connection), as
+     *  opposed to a CDN server answer (HTTP 4xx) or a decoding problem. */
+    private fun isConnectivityFailure(error: PlaybackException): Boolean {
+        if (error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+        ) {
+            return true
+        }
+        var cause: Throwable? = error.cause
+        while (cause != null) {
+            if (cause is UnknownHostException || cause is ConnectException ||
+                cause is SocketTimeoutException || cause is SocketException ||
+                cause is SSLException
+            ) {
+                return true
+            }
+            cause = cause.cause
+        }
+        return false
+    }
+
+    /**
+     * After a run of connectivity failures, stop skipping and retry the current
+     * item with capped exponential backoff. Every mirror/re-resolution attempt
+     * hits the same dead network, so this is both less wasteful and less
+     * destructive than burning through the whole queue while the network is out.
+     */
+    private fun scheduleNetworkRetry(c: MediaController) {
+        if (networkRetryJob?.isActive == true) return
+        networkRetryJob = scope.launch {
+            val shift = (consecutiveNetworkFailures - NETWORK_FAILURE_BACKOFF_THRESHOLD)
+                .coerceIn(0, 4)
+            val waitMs = NETWORK_RETRY_BASE_MS.toLong() shl shift
+            _state.value = _state.value.copy(
+                error = "网络连接异常，${waitMs / 1000} 秒后自动重试",
+                isPlaying = false,
+                retrying = false,
+            )
+            AppLog.w(TAG, "网络连续失败 $consecutiveNetworkFailures 次，${waitMs}ms 后自动重试")
+            delay(waitMs)
+            val cc = controller ?: return@launch
+            if (cc !== c || cc.mediaItemCount == 0) return@launch
+            // Re-prepare the still-current item; a recovered network plays it back.
+            cc.prepare()
+            cc.play()
+        }
+    }
+
+    /**
+     * Just-in-time pre-warm: the background fill resolves the WHOLE queue up
+     * front, and those signed links expire within hours — a long session then
+     * hits a reactive 403 on every later track. Whenever a track starts, look
+     * one ahead and, if its URL is already past its `deadline`, re-resolve it
+     * during the minutes the current track still has, then swap the fresh link
+     * into the timeline so the auto-advance lands on a live URL.
+     */
+    private fun prewarmNextIfExpired() {
+        val c = controller ?: return
+        val next = c.currentMediaItemIndex + 1
+        if (next >= c.mediaItemCount) return
+        val mediaId = c.getMediaItemAt(next).mediaId ?: return
+        if (!isTrackUrlExpired(mediaId)) return
+        // Look the track up BEFORE marking in-flight: a missing track must not
+        // leave `mediaId` stuck in [prewarmInFlight], or a later transition that
+        // does find the track would be silently skipped forever.
+        val track = pendingTrack[mediaId]
+            ?: _state.value.queue.firstOrNull { it.uid == mediaId }
+            ?: return
+        if (!prewarmInFlight.add(mediaId)) return // already resolving it
+        AppLog.w(TAG, "预刷新即将过期音源 bvid=$mediaId")
+        scope.launch {
+            val fresh = try {
+                resolveFresh(track).getOrNull()
+            } finally {
+                prewarmInFlight.remove(mediaId)
+            }
+            val cc = controller ?: return@launch
+            if (cc !== c || fresh == null || !fresh.hasAudio) return@launch
+            // The queue may have shrunk or the user jumped ahead — only swap the
+            // slot when it is still strictly ahead of, and still the same entry,
+            // as when the pre-warm began.
+            if (next >= cc.mediaItemCount || next <= cc.currentMediaItemIndex) return@launch
+            if (cc.getMediaItemAt(next).mediaId != mediaId) return@launch
+            pendingUrls[mediaId] = fresh.usableAudioUrls
+            pendingIndex[mediaId] = 0
+            pendingTrack[mediaId] = fresh
+            mergeResolvedIntoQueue(fresh)
+            runCatching {
+                cc.replaceMediaItem(next, toMediaItem(fresh, fresh.usableAudioUrls.first()))
+            }.onSuccess {
+                AppLog.i(TAG, "预刷新完成 bvid=$mediaId")
+            }
+        }
+    }
+
     /**
      * After giving up on the current track, jump to the next one so a dead
      * song cannot wedge the whole queue while playing in the background. The
@@ -1178,10 +1428,25 @@ object PlayerController {
             else -> return
         }
         if (next == cur) return
-        Log.w(TAG, "跳过无法播放的曲目 $cur -> $next")
+        AppLog.w(TAG, "跳过无法播放的曲目 $cur -> $next")
         c.seekTo(next, C.TIME_UNSET)
         c.prepare()
         c.play()
+    }
+
+    /**
+     * Human hint for the HTTP status behind a ExoPlayer errorCode 2004
+     * (ERROR_CODE_IO_BAD_HTTP_STATUS). The B站 audio CDN answering with a
+     * non-2xx is almost always 403, but spelling out the common codes turns an
+     * opaque "2004" into an actionable one-liner (re-login / wait / re-resolve).
+     */
+    private fun httpFailureHint(code: Int): String = when (code) {
+        401 -> "需要登录（CDN 拒绝未登录访问）"
+        403 -> "CDN 拒绝访问（防盗链 / 风控 / 链接失效）"
+        404 -> "资源不存在（链接已过期，重新解析即可）"
+        429 -> "请求过于频繁（触发 B 站风控，稍后再试）"
+        in 500..599 -> "CDN 服务异常（稍后重试）"
+        else -> "HTTP $code"
     }
 
     private fun toMediaItem(track: Track?, url: String): MediaItem =

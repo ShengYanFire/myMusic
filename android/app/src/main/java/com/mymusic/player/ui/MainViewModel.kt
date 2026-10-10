@@ -13,6 +13,7 @@ import com.mymusic.player.domain.Track
 import com.mymusic.player.network.SearchItem
 import com.mymusic.player.util.runSuspendCatching
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
@@ -38,6 +40,7 @@ import kotlinx.coroutines.launch
  * process-wide [PlaybackQueueCoordinator] the Application owns (so it keeps
  * resolving in the background); this ViewModel forwards the play requests to it.
  */
+@OptIn(FlowPreview::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // Single shared repository/store instances (stateless singletons created
@@ -354,6 +357,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         combine(settings.favoriteGenres, settings.favoriteMoods) { g, m -> g to m }
             .distinctUntilChanged()
             .drop(1)
+            // Rapid multi-chip toggles in the settings page would otherwise each
+            // fire a full recommendation reload; a short debounce lets them
+            // coalesce into one re-personalization at the end.
+            .debounce(PREFERENCE_RELOAD_DEBOUNCE_MS)
             .onEach { reloadRecommendations(keepOnError = true) }
             .launchIn(viewModelScope)
     }
@@ -431,6 +438,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val RECOMMEND_BATCH = 20
         private const val SEARCH_PAGE_SIZE = 20
+
+        /** Quiet window before a preference change triggers a feed reload. */
+        private const val PREFERENCE_RELOAD_DEBOUNCE_MS = 400L
     }
 
     // ---- Library actions ----

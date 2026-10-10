@@ -55,6 +55,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.painter.ColorPainter
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -171,6 +173,17 @@ fun GradientProgressBar(
     }
 }
 
+/**
+ * Neutral color-block painter used as the cover placeholder / error state, so
+ * artwork never pops in over a blank gap while loading or after a failed
+ * request. Reads the theme color at the call site and remembers it.
+ */
+@Composable
+fun coverPlaceholder(): Painter {
+    val color = MaterialTheme.colorScheme.surfaceContainerHigh
+    return remember(color) { ColorPainter(color) }
+}
+
 /** Rounded-square album artwork with a soft shadow. */
 @Composable
 fun AlbumCover(
@@ -194,6 +207,8 @@ fun AlbumCover(
         model = model,
         contentDescription = null,
         modifier = modifier,
+        placeholder = coverPlaceholder(),
+        error = coverPlaceholder(),
         contentScale = ContentScale.Crop,
     )
 }

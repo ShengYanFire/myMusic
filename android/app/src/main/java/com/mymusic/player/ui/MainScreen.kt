@@ -69,6 +69,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val LOGIN = "login"
     const val LYRICS = "lyrics"
+    const val LOG = "log"
 }
 
 private data class NavItem(val route: String, val label: String, val icon: ImageVector)
@@ -132,7 +133,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
 
     val showMiniPlayer = currentRoute != Routes.NOW_PLAYING &&
         currentRoute != Routes.LYRICS &&
-        currentRoute != Routes.LOGIN
+        currentRoute != Routes.LOGIN &&
+        currentRoute != Routes.LOG
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -196,11 +198,17 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 SettingsScreen(
                     vm = vm,
                     onOpenLogin = { navController.navigateToDetail(Routes.LOGIN) },
+                    onOpenLog = { navController.navigateToDetail(Routes.LOG) },
                 )
             }
             composable(Routes.LOGIN) {
                 LoginScreen(
                     vm = vm,
+                    onClose = { navController.popBackStack() },
+                )
+            }
+            composable(Routes.LOG) {
+                LogScreen(
                     onClose = { navController.popBackStack() },
                 )
             }
@@ -252,6 +260,8 @@ private fun MiniPlayer(
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(12.dp)),
+                placeholder = coverPlaceholder(),
+                error = coverPlaceholder(),
                 contentScale = ContentScale.Crop,
             )
             Spacer(Modifier.width(12.dp))

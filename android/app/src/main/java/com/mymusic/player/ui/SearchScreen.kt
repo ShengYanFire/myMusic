@@ -632,6 +632,8 @@ private fun SearchRow(
                 .size(56.dp)
                 .shadow(2.dp, RoundedCornerShape(12.dp))
                 .clip(RoundedCornerShape(12.dp)),
+            placeholder = coverPlaceholder(),
+            error = coverPlaceholder(),
             contentScale = ContentScale.Crop,
         )
         Spacer(Modifier.width(12.dp))

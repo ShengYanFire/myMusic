@@ -252,11 +252,18 @@ fun LoginScreen(
                             factory = { ctx ->
                                 WebView(ctx).apply {
                                     settings.javaScriptEnabled = true
+                                    // localStorage is required by the passport SPA. Web SQL
+                                    // (databaseEnabled) is dead in modern WebView/Chrome and
+                                    // deliberately left off.
                                     settings.domStorageEnabled = true
-                                    settings.databaseEnabled = true
                                     // A normal Chrome UA avoids Bilibili risk-control flags.
                                     settings.userAgentString = CHROME_UA
                                     CookieManager.getInstance().setAcceptCookie(true)
+                                    // Third-party cookies stay ON: the login page's geetest
+                                    // CAPTCHA makes cross-domain requests (geetest.com) that
+                                    // track their own session, and a normal browser sends
+                                    // them — turning them off risks breaking verification and
+                                    // makes the client look less like a real browser.
                                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                                     webViewClient = object : WebViewClient() {
                                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {

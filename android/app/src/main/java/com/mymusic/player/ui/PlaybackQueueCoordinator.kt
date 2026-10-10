@@ -6,6 +6,7 @@ import com.mymusic.player.data.ResolvedTrack
 import com.mymusic.player.domain.Track
 import com.mymusic.player.network.toTrack
 import com.mymusic.player.player.PlayerController
+import com.mymusic.player.util.AppLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -207,6 +208,7 @@ class PlaybackQueueCoordinator(
                 // Same contract as the tapped-song path: a slow B站 reads as a
                 // clear message, not a silent "点下一首没反应".
                 player.clearLoadingNext()
+                AppLog.w(TAG, "下一首解析超时 uid=${track.uid}")
                 onMessage("下一首解析超时，请检查网络后重试")
                 return@launch
             } catch (e: CancellationException) {
@@ -214,12 +216,14 @@ class PlaybackQueueCoordinator(
                 return@launch
             } catch (e: Exception) {
                 player.clearLoadingNext()
+                AppLog.w(TAG, "下一首解析失败 uid=${track.uid}: ${e.message ?: "无法获取音源"}")
                 onMessage("下一首解析失败：${e.message ?: "无法获取音源"}")
                 return@launch
             }
             val resolved = result.getOrNull()
             if (resolved == null || !resolved.hasAudio) {
                 player.clearLoadingNext()
+                AppLog.w(TAG, "下一首解析失败(无音源) uid=${track.uid}: ${result.exceptionOrNull()?.message ?: "无法获取音源"}")
                 onMessage("下一首解析失败：${result.exceptionOrNull()?.message ?: "无法获取音源"}")
                 return@launch
             }
@@ -235,6 +239,7 @@ class PlaybackQueueCoordinator(
             // the resolved track inserted but never playing.)
             if (!player.insertNextOnDemand(resolved)) {
                 player.clearLoadingNext()
+                AppLog.w(TAG, "下一首暂时无法播放 uid=${track.uid}")
                 onMessage("下一首暂时无法播放")
             }
         }

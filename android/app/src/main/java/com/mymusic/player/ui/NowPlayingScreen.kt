@@ -42,6 +42,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -94,6 +95,8 @@ fun NowPlayingScreen(
     val repeatMode by PlayerController.repeatMode.collectAsState()
     val shuffleEnabled by PlayerController.shuffleEnabled.collectAsState()
     val sleepRemaining by PlayerController.sleepRemainingMs.collectAsState()
+    val sleepWaitTrackEnd by PlayerController.sleepWaitTrackEnd.collectAsState()
+    val sleepAwaitingTrackEnd by PlayerController.sleepAwaitingTrackEnd.collectAsState()
     val favorites by vm.favorites.collectAsState()
     val playlists by vm.playlists.collectAsState()
     val scope = rememberCoroutineScope()
@@ -331,8 +334,9 @@ fun NowPlayingScreen(
                     LabeledIconButton(
                         onClick = { showSleepDialog = true },
                         icon = Icons.Filled.Timer,
-                        label = sleepRemaining?.let { formatMs(it) } ?: "定时",
-                        accent = sleepRemaining != null,
+                        label = sleepRemaining?.let { formatMs(it) }
+                            ?: if (sleepAwaitingTrackEnd) "本曲后关" else "定时",
+                        accent = sleepRemaining != null || sleepAwaitingTrackEnd,
                         contentDescription = "定时停止播放",
                     )
                 }
@@ -405,6 +409,8 @@ fun NowPlayingScreen(
                 PlayerController.setSleepTimer(minutes)
                 showSleepDialog = false
             },
+            waitForTrackEnd = sleepWaitTrackEnd,
+            onToggleWaitForTrackEnd = { PlayerController.setSleepWaitTrackEnd(it) },
         )
     }
 
@@ -438,6 +444,8 @@ private fun CoverArtwork(
             .shadow(8.dp, RoundedCornerShape(24.dp))
             .clip(RoundedCornerShape(24.dp))
             .clickable(onClick = onClick),
+        placeholder = coverPlaceholder(),
+        error = coverPlaceholder(),
         contentScale = ContentScale.Crop,
     )
 }
@@ -821,6 +829,8 @@ private fun QueueRow(
 fun SleepTimerDialog(
     onDismiss: () -> Unit,
     onPick: (Int) -> Unit,
+    waitForTrackEnd: Boolean,
+    onToggleWaitForTrackEnd: (Boolean) -> Unit,
 ) {
     val options = listOf(
         "关闭定时" to 0,
@@ -841,6 +851,23 @@ fun SleepTimerDialog(
                     ) {
                         Text(label)
                     }
+                }
+                // 到点后先等当前这一首自然播完，再停止并退出应用。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "结束后等当前歌曲播完再退出",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Switch(
+                        checked = waitForTrackEnd,
+                        onCheckedChange = onToggleWaitForTrackEnd,
+                    )
                 }
             }
         },

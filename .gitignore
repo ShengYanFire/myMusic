@@ -32,6 +32,8 @@ android/assemble.log
 # Local scratch / reference-extract directories
 /.gradle-tmp/
 /nav-src/
+/.acl-report/
+/.adb-logs/
 /navc-src/
 /navcmn-src/
 

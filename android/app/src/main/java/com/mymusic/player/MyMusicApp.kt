@@ -1,9 +1,12 @@
 package com.mymusic.player
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.content.Context
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import com.mymusic.player.data.AppSettings
 import com.mymusic.player.data.AudioResolutionCache
 import com.mymusic.player.data.LibraryStore
@@ -16,6 +19,7 @@ import com.mymusic.player.network.BiliHeaders
 import com.mymusic.player.network.LyricsClient
 import com.mymusic.player.player.PlayerController
 import com.mymusic.player.ui.PlaybackQueueCoordinator
+import com.mymusic.player.util.AppLog
 import com.mymusic.player.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +43,11 @@ class MyMusicApp : Application(), ImageLoaderFactory {
 
     // Built once and reused: newImageLoader() may be called more than once,
     // and each call would otherwise create a fresh OkHttpClient + memory cache.
-    private val imageLoader by lazy { buildImageLoader() }
+    // The explicit Lazy lets onTrimMemory skip the first-time build instead of
+    // allocating a whole ImageLoader (client + caches) just to clear it while
+    // the system is already under memory pressure.
+    private val imageLoaderDelegate = lazy { buildImageLoader() }
+    private val imageLoader: ImageLoader by imageLoaderDelegate
 
     lateinit var settings: AppSettings
         private set
@@ -104,6 +112,8 @@ class MyMusicApp : Application(), ImageLoaderFactory {
     // "applicationContext must not be null" and the app crashes before launch.
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(this)
+        installCrashHandler()
         httpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
@@ -157,6 +167,36 @@ class MyMusicApp : Application(), ImageLoaderFactory {
             .launchIn(appScope)
     }
 
+    /**
+     * Capture uncaught exceptions to the daily-use log file before letting the
+     * previous handler run (system crash dialog / Play reporting). This is how
+     * hard crashes — like a Compose layout crash — land in 错误日志 even though
+     * they never reach an explicit `Log.e`.
+     */
+    private fun installCrashHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            AppLog.e("UncaughtException", "崩溃：${throwable}", throwable)
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
+
+    /**
+     * Respond to system memory pressure by dropping the in-memory image cache.
+     * The covers are also cached on disk, so they re-load quickly once pressure
+     * passes — this frees the largest app-controllable memory consumer (besides
+     * the login WebView) exactly when the OS needs it most. Skips the first-time
+     * build: there is no point allocating a client + caches just to clear them.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW &&
+            imageLoaderDelegate.isInitialized()
+        ) {
+            imageLoader.memoryCache?.clear()
+        }
+    }
+
     override fun newImageLoader(): ImageLoader = imageLoader
 
     private fun buildImageLoader(): ImageLoader {
@@ -176,6 +216,23 @@ class MyMusicApp : Application(), ImageLoaderFactory {
         return ImageLoader.Builder(this)
             .okHttpClient(client)
             .crossfade(true)
+            // Covers are small thumbnails (44–236 dp), so Coil's default
+            // ~25%-of-heap in-memory cache is far more than they can ever use
+            // and eats headroom on low-RAM devices (especially while the login
+            // WebView is alive). Cap it at 10% and bound the disk cache too —
+            // re-decoding a cover from disk is cheap, so a smaller cache costs
+            // almost nothing.
+            .memoryCache(
+                MemoryCache.Builder(this)
+                    .maxSizePercent(0.10)
+                    .build(),
+            )
+            .diskCache(
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(64L * 1024 * 1024)
+                    .build(),
+            )
             .build()
     }
 

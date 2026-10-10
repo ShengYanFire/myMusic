@@ -33,6 +33,7 @@ class AppSettings(private val context: Context) {
     private val shuffleEnabledKey = booleanPreferencesKey("shuffle_enabled")
     private val favoriteGenresKey = stringSetPreferencesKey("favorite_genres")
     private val favoriteMoodsKey = stringSetPreferencesKey("favorite_moods")
+    private val sleepWaitTrackEndKey = booleanPreferencesKey("sleep_wait_track_end")
 
     val cookie: Flow<String> = context.settingsDataStore.data.map { prefs ->
         prefs[cookieKey] ?: ""
@@ -134,6 +135,20 @@ class AppSettings(private val context: Context) {
     suspend fun setShuffleEnabled(value: Boolean) {
         context.settingsDataStore.edit { prefs ->
             prefs[shuffleEnabledKey] = value
+        }
+    }
+
+    /**
+     * 定时停止播放：到点后是否等当前歌曲自然播完再退出应用（默认 false = 立即
+     * 关闭，保持旧行为）。
+     */
+    val sleepWaitTrackEnd: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
+        prefs[sleepWaitTrackEndKey] ?: false
+    }
+
+    suspend fun setSleepWaitTrackEnd(value: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[sleepWaitTrackEndKey] = value
         }
     }
 

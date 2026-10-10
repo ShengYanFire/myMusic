@@ -26,6 +26,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -66,6 +68,7 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
     vm: MainViewModel,
     onOpenLogin: () -> Unit = {},
+    onOpenLog: () -> Unit = {},
 ) {
     val quality by vm.quality.collectAsState()
     val favoriteGenres by vm.favoriteGenres.collectAsState()
@@ -212,7 +215,8 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "影响音源码率：高清码率更高，流畅更省流量。改动即时生效。",
+                // 改动只作用于「下一次解析」，正在播放的歌曲不会中途切换码率。
+                "影响音源码率：高清码率更高，流畅更省流量；对之后播放的歌曲生效。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -274,6 +278,24 @@ fun SettingsScreen(
                     "• 后台播放：播放后切到后台或锁屏仍会继续，通知栏与锁屏可控制播放。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // ---- Diagnostics ----
+        SettingCard(title = "诊断", icon = Icons.Filled.BugReport) {
+            Text(
+                "查看 App 日常运行收集的错误日志（崩溃、播放错误、网络/解析失败），可复制或分享以便排查。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(14.dp))
+            GradientButton(
+                text = "查看错误日志",
+                icon = Icons.Filled.Description,
+                onClick = onOpenLog,
+                modifier = Modifier.fillMaxWidth(),
             )
         }
 

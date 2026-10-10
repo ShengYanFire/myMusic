@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
 import com.mymusic.player.data.AppSettings
+import com.mymusic.player.util.AppLog
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -300,7 +301,10 @@ class BiliDirectClient(
             }
 
             client.awaitCall(requestBuilder.build()).use { resp ->
-                if (!resp.isSuccessful) throw RuntimeException("B 站返回 HTTP ${resp.code}")
+                if (!resp.isSuccessful) {
+                    AppLog.w("BiliAPI", "$path -> HTTP ${resp.code}")
+                    throw RuntimeException("B 站返回 HTTP ${resp.code}")
+                }
                 val text = resp.body?.string() ?: throw RuntimeException("B 站返回空响应")
                 val obj = JsonParser.parseString(text).asJsonObject
                 val code = obj.get("code").intOr(-1)
@@ -308,6 +312,7 @@ class BiliDirectClient(
                 // wbi_img keys in data — so tolerate it where login isn't required.
                 if (code != 0 && !(allowLoggedOut && code == -101)) {
                     val msg = obj.get("message")?.asString ?: "未知错误"
+                    AppLog.w("BiliAPI", "$path -> code=$code $msg")
                     if (riskGate.isRiskControl(code)) {
                         // A risk-control code opens the cooldown right at the
                         // source, so -412/-509 on ANY endpoint arms it (not just

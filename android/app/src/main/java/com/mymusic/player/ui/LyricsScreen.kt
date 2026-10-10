@@ -258,7 +258,10 @@ private fun LyricsList(
         contentPadding = PaddingValues(vertical = centerPadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        itemsIndexed(lines, key = { _, line -> line.startMs }) { index, line ->
+        // Key by index (not startMs): timestamps are NOT guaranteed unique —
+        // plain/unsynced lyrics are all 0ms and LRC/subtitles can repeat a
+        // stamp, which made "Key \"0\" was already used" crash the list.
+        itemsIndexed(lines, key = { index, _ -> index }) { index, line ->
             val active = index == activeIndex
             val near = !active && (index == activeIndex - 1 || index == activeIndex + 1)
             val color by animateColorAsState(
